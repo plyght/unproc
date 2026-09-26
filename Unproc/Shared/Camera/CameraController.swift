@@ -177,6 +177,7 @@ final class CameraController {
         case let .switched(active, ranges):
             currentLens = active
             apply(ranges)
+            if !zoomFromCameraControl { engine.updateControlZoom(Float(active.zoom)) }
         case .failed:
             break
         }
@@ -199,6 +200,13 @@ final class CameraController {
     /// resolve to the real lens. Safe to call every frame of a drag: calls are
     /// coalesced and only the latest value is applied.
     func setZoom(_ zoom: CGFloat) {
+        setZoom(zoom, fromCameraControl: false)
+    }
+
+    @ObservationIgnored private var zoomFromCameraControl = false
+
+    private func setZoom(_ zoom: CGFloat, fromCameraControl: Bool) {
+        zoomFromCameraControl = fromCameraControl
         pendingZoom = zoom
         guard !isApplyingZoom else { return }
         isApplyingZoom = true
@@ -210,6 +218,7 @@ final class CameraController {
                 }
             }
             isApplyingZoom = false
+            zoomFromCameraControl = false
         }
     }
 
@@ -312,9 +321,14 @@ final class CameraController {
     }
 
     func setExposureBias(_ ev: Float) {
+        setExposureBias(ev, fromCameraControl: false)
+    }
+
+    private func setExposureBias(_ ev: Float, fromCameraControl: Bool) {
         exposure.bias = CameraMath.clamp(ev, exposure.biasRange)
         guard demo == nil else { return }
         engine.setBias(exposure.bias)
+        if !fromCameraControl { engine.updateControlBias(exposure.bias) }
     }
 
     func setWhiteBalance(kelvin: Float?) {
@@ -398,11 +412,38 @@ final class CameraController {
 
     /// Camera Control (iPhone 16+): installs an exposure-bias slider and a Look picker.
     /// Re-installed automatically when the lens changes (the slider is device-bound).
-    func installCaptureControls(lookCodes: [String], selectedIndex: Int, onSelect: @escaping @Sendable (Int) -> Void) {
+    /// Camera Control (iPhone 16+): Zoom and Exposure drive the camera
+    /// directly; Look and Ratio report back through the callbacks.
+    func installCaptureControls(lookCodes: [String], selectedIndex: Int,
+                                onSelect: @escaping @Sendable (Int) -> Void,
+                                ratioTitles: [String] = [], ratioIndex: Int = 0,
+                                onRatio: @escaping @Sendable (Int) -> Void = { _ in }) {
         guard demo == nil else { return }
-        engine.installCaptureControls(CaptureControlsConfig(lookCodes: lookCodes,
-                                                            selectedIndex: selectedIndex,
-                                                            onSelect: onSelect))
+        let config = CaptureControlsConfig(
+            zoomStops: zoomStops.map { Float($0) },
+            zoom: Float(currentLens?.zoom ?? 1),
+            onZoom: { [weak self] value in
+                Task { @MainActor in self?.setZoom(CGFloat(value), fromCameraControl: true) }
+            },
+            biasRange: exposure.biasRange,
+            bias: exposure.bias,
+            onBias: { [weak self] value in
+                Task { @MainActor in self?.setExposureBias(value, fromCameraControl: true) }
+            },
+            lookCodes: lookCodes,
+            selectedIndex: selectedIndex,
+            onSelect: onSelect,
+            ratioTitles: ratioTitles,
+            ratioIndex: ratioIndex,
+            onRatio: onRatio
+        )
+        engine.installCaptureControls(config)
+    }
+
+    /// Keeps the Camera Control Ratio picker in step with the on-screen setting.
+    func setCaptureControlsRatio(_ index: Int) {
+        guard demo == nil else { return }
+        engine.updateControlRatio(index)
     }
 
     /// Moves the Camera Control Look picker's selection without rebuilding the controls.

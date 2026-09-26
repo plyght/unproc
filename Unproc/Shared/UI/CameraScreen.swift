@@ -200,21 +200,10 @@ struct CameraScreen: View {
             }
         }
         // Settings → camera.
-        .onChange(of: camera.currentLens?.id) { _, id in
-            if let id, settings.value.lensID != id { settings.value.lensID = id }
-        }
-        .onChange(of: settings.value.rawFlavor) { _, flavor in
-            Task { await camera.setRawFlavor(flavor) }
-        }
+        .modifier(Observers(camera: camera, settings: settings, shutter: shutter))
         .onChange(of: settings.value.proMode) { _, pro in
             camera.proEnabled = pro
             if !pro { proExpanded = nil }
-        }
-        .onChange(of: settings.value.accent) { _, _ in
-            DeviceAccent.refresh()
-        }
-        .onChange(of: settings.value.doubleExposure) { _, on in
-            if !on { shutter.cancelDoubleExposure() }
         }
         .onChange(of: settings.value.lookID) { _, id in
             showLookToast(LookLibrary.look(id: id))
@@ -222,6 +211,38 @@ struct CameraScreen: View {
         .onChange(of: shutter.flash) { _, _ in blink() }
         .onChange(of: camera.openShutterDuration) { _, duration in
             longExposureStart = duration == nil ? nil : Date()
+        }
+    }
+
+    /// Settings → camera sync (no view state touched). Split out of `body`
+    /// so it type-checks on its own.
+    private struct Observers: ViewModifier {
+        let camera: CameraController
+        let settings: SettingsStore
+        let shutter: ShutterCoordinator
+
+        func body(content: Content) -> some View {
+            content
+                .onChange(of: camera.currentLens?.id) { _, id in
+                    if let id, settings.value.lensID != id { settings.value.lensID = id }
+                }
+                .onChange(of: settings.value.rawFlavor) { _, flavor in
+                    Task { await camera.setRawFlavor(flavor) }
+                }
+                .onChange(of: settings.value.accent) { _, _ in
+                    DeviceAccent.refresh()
+                }
+                .onChange(of: settings.value.doubleExposure) { _, on in
+                    if !on { shutter.cancelDoubleExposure() }
+                }
+                .onChange(of: settings.value.lookID) { _, id in
+                    if let index = LookLibrary.all.firstIndex(where: { $0.id == id }) {
+                        camera.setCaptureControlsSelection(index)
+                    }
+                }
+                .onChange(of: settings.value.ratio) { _, ratio in
+                    camera.setCaptureControlsRatio(FrameRatio.allCases.firstIndex(of: ratio) ?? 0)
+                }
         }
     }
 
@@ -608,6 +629,15 @@ struct CameraScreen: View {
                     let all = LookLibrary.all
                     guard all.indices.contains(index) else { return }
                     SettingsStore.shared.value.lookID = all[index].id
+                }
+            },
+            ratioTitles: FrameRatio.allCases.map(\.rawValue),
+            ratioIndex: FrameRatio.allCases.firstIndex(of: settings.value.ratio) ?? 0,
+            onRatio: { index in
+                Task { @MainActor in
+                    let all = FrameRatio.allCases
+                    guard all.indices.contains(index) else { return }
+                    SettingsStore.shared.value.ratio = all[index]
                 }
             }
         )

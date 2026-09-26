@@ -99,3 +99,8 @@ MIT. see [LICENSE](LICENSE).
 ## Dependencies
 
 - [Glur](https://github.com/joogps/Glur) (`GlurBackdrop`) — the progressive blur on the top and bottom edges of the 16:9 viewfinder. Note: `GlurBackdrop` uses a private Core Animation API; fine for sideloading, review before an App Store submission.
+
+## Camera Control (iPhone 16 and later)
+
+- **Open unproc with the button:** Settings › Camera › Camera Control › Launch Camera › **unproc**. unproc is eligible because it ships a Lock Screen capture extension; it also works from the Lock Screen and Control Centre.
+- **In the app:** press to take a photo. Light-press and slide to switch between **Zoom** (snaps to your lens stops), **Exposure**, **Look** and **Ratio**. They stay in sync with the on-screen controls.

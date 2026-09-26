@@ -99,7 +99,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     private var subjectAreaToken: NSObjectProtocol?
     private var sessionTokens: [NSObjectProtocol] = []
     private var controlsConfig: CaptureControlsConfig?
-    private var lookPicker: AVCaptureIndexPicker?
+    private var installedControls = InstalledCaptureControls()
     private let controlsDelegate = CaptureControlsDelegate()
 
     // Exposure / focus intent as applied to the device.
@@ -308,7 +308,8 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         }
         setZoom(lens.crop, on: newDevice)
         bind(newDevice)
-        if controlsConfig != nil {
+        // Controls aren't device-bound: install once, keep them across lens switches.
+        if controlsConfig != nil, session.controls.isEmpty {
             installControls()
         }
     }
@@ -763,19 +764,46 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             guard var config = controlsConfig else { return }
             config.selectedIndex = index
             controlsConfig = config
-            if let lookPicker, !config.lookCodes.isEmpty {
-                lookPicker.selectedIndex = CameraMath.clamp(index, 0, config.lookCodes.count - 1)
+            if let look = installedControls.look, !config.lookCodes.isEmpty {
+                look.selectedIndex = CameraMath.clamp(index, 0, config.lookCodes.count - 1)
             }
         }
     }
 
+    /// Keeps the Camera Control zoom slider in step with on-screen zooming.
+    func updateControlZoom(_ zoom: Float) {
+        sessionQueue.async { [self] in
+            controlsConfig?.zoom = zoom
+            guard let slider = installedControls.zoom, !installedControls.zoomValues.isEmpty else { return }
+            let value = CaptureControlsInstaller.nearest(zoom, in: installedControls.zoomValues)
+            if slider.value != value { slider.value = value }
+        }
+    }
+
+    func updateControlBias(_ bias: Float) {
+        sessionQueue.async { [self] in
+            controlsConfig?.bias = bias
+            guard let slider = installedControls.bias, let bounds = installedControls.biasBounds else { return }
+            // Out-of-range values would raise; snap to the slider's third stops.
+            let snapped = min(max((bias * 3).rounded() / 3, bounds.lowerBound), bounds.upperBound)
+            if abs(slider.value - snapped) > 0.01 { slider.value = snapped }
+        }
+    }
+
+    func updateControlRatio(_ index: Int) {
+        sessionQueue.async { [self] in
+            controlsConfig?.ratioIndex = index
+            guard let picker = installedControls.ratio, let config = controlsConfig, !config.ratioTitles.isEmpty else { return }
+            picker.selectedIndex = CameraMath.clamp(index, 0, config.ratioTitles.count - 1)
+        }
+    }
+
     private func installControls() {
-        guard let config = controlsConfig, let device, configured else { return }
-        lookPicker = CaptureControlsInstaller.install(on: session,
-                                                      device: device,
-                                                      config: config,
-                                                      delegate: controlsDelegate,
-                                                      delegateQueue: sessionQueue)
+        guard let config = controlsConfig, device != nil, configured else { return }
+        installedControls = CaptureControlsInstaller.install(on: session,
+                                                             config: config,
+                                                             delegate: controlsDelegate,
+                                                             delegateQueue: sessionQueue)
     }
 
     // MARK: - Capture
