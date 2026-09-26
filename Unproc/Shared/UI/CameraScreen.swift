@@ -140,21 +140,6 @@ struct CameraScreen: View {
                         .zIndex(2)
                 }
 
-                if zoomDialVisible {
-                    // Inline beside the lens button: the ruler's marker is level with
-                    // the button's centre and the button sits over its trailing end.
-                    let lensCentreX = geo.size.width - m.barInset - Metrics.sideItem / 2
-                    let lensCentreY = m.barTop + m.barHeight / 2
-                    ZoomDial(model: zoomScrub) { dy in
-                        dialDrag(dy)
-                    }
-                    .position(x: lensCentreX + Metrics.sideItem / 2 - ZoomDial.width / 2, y: lensCentreY)
-                    .transition(Theme.transition(
-                        .scale(scale: 0.9, anchor: .trailing).combined(with: .opacity),
-                        reduceMotion: reduceMotion
-                    ))
-                    .zIndex(1)
-                }
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }
@@ -460,7 +445,8 @@ struct CameraScreen: View {
 
             LensButton(
                 current: camera.currentLens,
-                liveLabel: zoomDialVisible && !zoomScrub.isFront ? ZoomDial.label(zoomScrub.zoom, precise: true) : nil,
+                model: zoomScrub,
+                isExpanded: zoomDialVisible,
                 onTap: { cycleLens() },
                 onScrubBegin: {
                     closeFloating()
@@ -509,16 +495,6 @@ struct CameraScreen: View {
             guard !Task.isCancelled else { return }
             withAnimation(Theme.exit) { zoomDialVisible = false }
         }
-    }
-
-    /// Drags on the dial itself (after it's shown).
-    private func dialDrag(_ dy: CGFloat?) {
-        guard let dy else {
-            endZoomScrub()
-            return
-        }
-        if !zoomScrub.isActive { beginZoomScrub() }
-        perform(zoomScrub.update(dy: dy))
     }
 
     private func perform(_ action: ZoomScrubModel.Action?) {

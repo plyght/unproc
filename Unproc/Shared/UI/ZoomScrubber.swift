@@ -214,62 +214,52 @@ final class ZoomScrubModel {
     }
 }
 
-/// Inline vertical zoom dial (the PRO dial's ruler, stood on end), drawn on
-/// the black beside the lens button. The scale slides under a fixed accent
-/// marker level with the button's centre: drag up to zoom in, down to zoom
-/// out. Lens stops are labelled major ticks; forcing below .5× opens a gap
-/// above the marker where "SELFIE" fades in, and flips when pulled far enough.
-struct ZoomDial: View {
+/// The ruler that appears through the lens button while zooming: a plain
+/// vertical scale (no glass) that slides past the button's own zoom number,
+/// which stays put in the middle. Higher zoom sits *below* the number, so
+/// pulling the scale up (finger up) brings it in. Forcing below .5× opens a
+/// gap above the number where "SELFIE" fades in.
+struct ZoomRuler: View {
     let model: ZoomScrubModel
-    /// Called with the vertical drag translation; nil on end.
-    let onDrag: (CGFloat?) -> Void
-
-    /// The dial's width: the ruler runs just left of the lens button, which
-    /// occupies the trailing `buttonSide` points and sits on the marker.
-    static let width: CGFloat = 124
-    static let height: CGFloat = 280
-    static let buttonSide: CGFloat = 52
 
     var body: some View {
-        Canvas { context, size in
-            draw(in: &context, size: size)
+        ZStack {
+            Canvas { context, size in
+                draw(in: &context, size: size)
+            }
+            .mask {
+                LinearGradient(stops: [
+                    .init(color: .clear, location: 0),
+                    .init(color: .black, location: 0.22),
+                    .init(color: .black, location: 0.78),
+                    .init(color: .clear, location: 1),
+                ], startPoint: .top, endPoint: .bottom)
+            }
+
+            flipHint
         }
-        .mask {
-            LinearGradient(stops: [
-                .init(color: .clear, location: 0),
-                .init(color: .black, location: 0.2),
-                .init(color: .black, location: 0.8),
-                .init(color: .clear, location: 1),
-            ], startPoint: .top, endPoint: .bottom)
-        }
-        .overlay { flipHint }
-        .frame(width: Self.width, height: Self.height)
-        .contentShape(Rectangle())
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { onDrag($0.translation.height) }
-                .onEnded { _ in onDrag(nil) }
-        )
         .animation(.interactiveSpring(response: 0.22, dampingFraction: 0.86), value: model.stretch)
-        .accessibilityIdentifier("zoomDial")
+        .allowsHitTesting(false)
     }
 
-    // MARK: Drawing
-
-    /// Higher zoom sits *below* the marker, so pulling the scale up brings it in.
     private func y(for trackPosition: CGFloat, centre: CGFloat) -> CGFloat {
         centre + (trackPosition - model.position) - model.stretch
     }
 
     private func draw(in context: inout GraphicsContext, size: CGSize) {
         let cy = size.height / 2
-        let tickRight = size.width - Self.buttonSide - 8
+        let cx = size.width / 2
+        // Keep the readout clear.
+        let clearance: CGFloat = 16
 
-        // Fixed marker, pointing at the button.
-        var marker = Path()
-        marker.move(to: CGPoint(x: tickRight - 16, y: cy))
-        marker.addLine(to: CGPoint(x: tickRight + 2, y: cy))
-        context.stroke(marker, with: .color(Theme.accent), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+        // Centre marks either side of the readout.
+        for side in [-1.0, 1.0] {
+            var mark = Path()
+            let x0 = cx + CGFloat(side) * (size.width / 2 - 2)
+            mark.move(to: CGPoint(x: x0, y: cy))
+            mark.addLine(to: CGPoint(x: x0 - CGFloat(side) * 5, y: cy))
+            context.stroke(mark, with: .color(Theme.accent), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+        }
 
         guard !model.isFront else { return }
         let stops = model.stops
@@ -279,26 +269,21 @@ struct ZoomDial: View {
             for step in 1..<8 {
                 let z = stops[i] * pow(stops[i + 1] / stops[i], CGFloat(step) / 8)
                 let py = y(for: model.position(forZoom: z), centre: cy)
-                guard py > -4, py < size.height + 4, abs(py - cy) > 3 else { continue }
+                guard py > -4, py < size.height + 4, abs(py - cy) > clearance else { continue }
                 var tick = Path()
-                tick.move(to: CGPoint(x: tickRight - 6, y: py))
-                tick.addLine(to: CGPoint(x: tickRight, y: py))
+                tick.move(to: CGPoint(x: cx - 4, y: py))
+                tick.addLine(to: CGPoint(x: cx + 4, y: py))
                 context.stroke(tick, with: .color(.white.opacity(0.3)), lineWidth: 1)
             }
         }
-        // Major ticks at lens stops, labelled to their left.
+        // Stops: labels on the scale itself.
         for (i, stop) in stops.enumerated() {
             let py = y(for: model.position(ofStop: i), centre: cy)
-            guard py > -12, py < size.height + 12 else { continue }
-            let active = abs(stop - model.zoom) / stop < 0.01
-            var tick = Path()
-            tick.move(to: CGPoint(x: tickRight - 11, y: py))
-            tick.addLine(to: CGPoint(x: tickRight, y: py))
-            context.stroke(tick, with: .color(active ? Theme.accent : .white.opacity(0.75)), lineWidth: 1.5)
+            guard py > -12, py < size.height + 12, abs(py - cy) > clearance else { continue }
             let text = Text(ZoomDial.label(stop))
-                .font(Theme.mono(9, weight: .semibold))
-                .foregroundStyle(active ? Theme.accent : Color.white.opacity(0.65))
-            context.draw(text, at: CGPoint(x: tickRight - 18, y: py), anchor: .trailing)
+                .font(Theme.mono(9, weight: .bold))
+                .foregroundStyle(Color.white.opacity(0.8))
+            context.draw(text, at: CGPoint(x: cx, y: py))
         }
     }
 
@@ -306,19 +291,18 @@ struct ZoomDial: View {
     private var flipHint: some View {
         let p = model.flipProgress
         if p > 0.05 {
-            // In the gap the scale stretches away from: above when forcing to
-            // selfie (scale pulled down), below when forcing back.
+            // In the gap the scale stretches away from.
             Text(model.isFront ? "BACK" : "SELFIE")
-                .monoLabel(9, weight: .bold, color: p >= 1 ? Theme.accent : Theme.primary)
+                .monoLabel(8, weight: .bold, color: p >= 1 ? Theme.accent : Theme.primary)
                 .opacity(Double(p))
                 .scaleEffect(0.85 + 0.15 * p)
                 .fixedSize()
-                .frame(maxWidth: .infinity, alignment: .trailing)
-                .padding(.trailing, Self.buttonSide + 8)
-                .offset(y: model.isFront ? 44 : -44)
+                .offset(y: model.isFront ? 36 : -36)
         }
     }
+}
 
+enum ZoomDial {
     static func label(_ zoom: CGFloat, precise: Bool = false) -> String {
         if zoom < 1 {
             return String(format: "%.1f×", zoom).replacingOccurrences(of: "0.", with: ".")

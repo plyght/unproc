@@ -1,18 +1,20 @@
 import SwiftUI
 
-/// Bottom-right glass lens button.
+/// Bottom-right lens button: the zoom number in a Liquid Glass circle.
 ///
 /// - Tap: next lens.
-/// - Press and hold (or start dragging vertically): the inline vertical zoom
-///   dial appears beside it; drag up to zoom in, down to zoom out, and keep
-///   forcing past .5× to flip to the selfie camera.
+/// - Press and hold (or start dragging vertically): the glass circle fades
+///   away, the number stays where it is, and a vertical ruler appears through
+///   it. Drag up to zoom in, down to zoom out; keep forcing past .5× to flip to
+///   the selfie camera. Release and the ruler hides as the circle comes back.
 ///
-/// One `DragGesture(minimumDistance: 0)` drives all three so a hold never
+/// One `DragGesture(minimumDistance: 0)` drives all of it so a hold never
 /// also fires a tap and the drag continues seamlessly from the press.
 struct LensButton: View {
     let current: Lens?
-    /// Shown instead of the lens label while scrubbing (e.g. "2.4×").
-    var liveLabel: String? = nil
+    let model: ZoomScrubModel
+    /// True while the ruler is showing (it lingers briefly after release).
+    let isExpanded: Bool
     let onTap: () -> Void
     let onScrubBegin: () -> Void
     let onScrubChange: (CGFloat) -> Void
@@ -22,57 +24,76 @@ struct LensButton: View {
     @State private var isScrubbing = false
     @State private var holdTask: Task<Void, Never>?
 
+    static let rulerSize = CGSize(width: 64, height: 232)
     private static let holdDelay: Duration = .milliseconds(260)
     private static let dragToScrub: CGFloat = 8
 
+    private var label: String {
+        if isExpanded, !model.isFront { return ZoomDial.label(model.zoom, precise: true) }
+        return current?.buttonLabel ?? "—"
+    }
+
     var body: some View {
-        Text(liveLabel ?? current?.buttonLabel ?? "—")
-            .monoLabel(current?.isFront == true && liveLabel == nil ? 11 : 14, weight: .semibold, uppercase: liveLabel == nil)
-            .monospacedDigit()
-            .contentTransition(.numericText())
-            .animation(Theme.snappy, value: current?.id)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .glassEffect(isScrubbing ? .regular.tint(Theme.accent.opacity(0.22)).interactive() : .regular.interactive(),
-                         in: .circle)
-            .contentShape(Circle())
-            .scaleEffect(isPressed ? 0.94 : 1)
-            .animation(Theme.press, value: isPressed)
-            .gesture(
-                DragGesture(minimumDistance: 0, coordinateSpace: .global)
-                    .onChanged { value in
-                        if !isPressed {
-                            isPressed = true
-                            holdTask?.cancel()
-                            holdTask = Task { @MainActor in
-                                try? await Task.sleep(for: Self.holdDelay)
-                                guard !Task.isCancelled, isPressed, !isScrubbing else { return }
-                                beginScrub()
-                            }
-                        }
-                        if !isScrubbing, abs(value.translation.height) > Self.dragToScrub {
+        ZStack {
+            if isExpanded {
+                ZoomRuler(model: model)
+                    .frame(width: Self.rulerSize.width, height: Self.rulerSize.height)
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            }
+            Text(label)
+                .monoLabel(current?.isFront == true && !isExpanded ? 11 : 14, weight: .semibold,
+                           color: isExpanded ? Theme.accent : Theme.primary,
+                           uppercase: !isExpanded)
+                .monospacedDigit()
+                .contentTransition(.numericText())
+                .animation(Theme.snappy, value: current?.id)
+                .frame(width: 52, height: 52)
+                // Glass only in the resting state; it melts away for the ruler.
+                .glassEffect(isExpanded ? .identity : .regular.interactive(), in: .circle)
+        }
+        .frame(width: 52, height: 52)
+        .contentShape(Circle())
+        .scaleEffect(isPressed && !isExpanded ? 0.94 : 1)
+        .animation(Theme.press, value: isPressed)
+        .animation(Theme.snappy, value: isExpanded)
+        .gesture(
+            DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                .onChanged { value in
+                    if !isPressed {
+                        isPressed = true
+                        // Ruler already out: grab it straight away.
+                        if isExpanded { beginScrub() }
+                        holdTask?.cancel()
+                        holdTask = Task { @MainActor in
+                            try? await Task.sleep(for: Self.holdDelay)
+                            guard !Task.isCancelled, isPressed, !isScrubbing else { return }
                             beginScrub()
                         }
-                        if isScrubbing {
-                            onScrubChange(value.translation.height)
-                        }
                     }
-                    .onEnded { _ in
-                        holdTask?.cancel()
-                        holdTask = nil
-                        isPressed = false
-                        if isScrubbing {
-                            isScrubbing = false
-                            onScrubEnd()
-                        } else {
-                            onTap()
-                        }
+                    if !isScrubbing, abs(value.translation.height) > Self.dragToScrub {
+                        beginScrub()
                     }
-            )
-            .sensoryFeedback(.impact(weight: .light), trigger: isScrubbing) { _, new in new }
-            .accessibilityAddTraits(.isButton)
-            .accessibilityLabel("Lens \(current?.buttonLabel ?? "")")
-            .accessibilityHint("Hold, then drag up to zoom in or down to zoom out")
-            .accessibilityIdentifier("lensButton")
+                    if isScrubbing {
+                        onScrubChange(value.translation.height)
+                    }
+                }
+                .onEnded { _ in
+                    holdTask?.cancel()
+                    holdTask = nil
+                    isPressed = false
+                    if isScrubbing {
+                        isScrubbing = false
+                        onScrubEnd()
+                    } else {
+                        onTap()
+                    }
+                }
+        )
+        .sensoryFeedback(.impact(weight: .light), trigger: isScrubbing) { _, new in new }
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel("Lens \(current?.buttonLabel ?? "")")
+        .accessibilityHint("Hold, then drag up to zoom in or down to zoom out")
+        .accessibilityIdentifier("lensButton")
     }
 
     private func beginScrub() {

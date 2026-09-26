@@ -146,12 +146,8 @@ final class ScreenshotTests: XCTestCase {
         dragWhileCapturing(from: start, dy: -150, name: "16-zoom-scrub-in")
         settle(0.3)
         snap("17-zoom-after-scrub")
-        // Grab the top of the (still showing) dial and force it down past .5×.
-        let dial = app.descendants(matching: .any)["zoomDial"]
-        if dial.waitForExistence(timeout: 1) {
-            let top = dial.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.08))
-            dragWhileCapturing(from: top, dy: 300, name: "18-zoom-force-selfie", holdFirst: 0.05)
-        }
+        // Hold again and force it down past .5×, toward the selfie flip.
+        dragWhileCapturing(from: start, dy: 110, name: "18-zoom-force-selfie", holdFirst: 0.05)
         settle()
         snap("19-selfie")
     }
