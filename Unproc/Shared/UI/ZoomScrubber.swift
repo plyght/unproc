@@ -232,6 +232,9 @@ final class ZoomScrubModel {
 /// gap above the number where "SELFIE" fades in.
 struct ZoomRuler: View {
     let model: ZoomScrubModel
+    /// How far below the centre the ruler may draw before fading out (it stops
+    /// at the image's bottom edge in 16:9, where the button floats over it).
+    var maxBelow: CGFloat = .infinity
 
     var body: some View {
         ZStack {
@@ -239,12 +242,19 @@ struct ZoomRuler: View {
                 draw(in: &context, size: size)
             }
             .mask {
-                LinearGradient(stops: [
-                    .init(color: .clear, location: 0),
-                    .init(color: .black, location: 0.22),
-                    .init(color: .black, location: 0.78),
-                    .init(color: .clear, location: 1),
-                ], startPoint: .top, endPoint: .bottom)
+                GeometryReader { proxy in
+                    let h = proxy.size.height
+                    let below = min(maxBelow, h / 2)
+                    let fade = min(h * 0.22, max(below * 0.6, 10))
+                    VStack(spacing: 0) {
+                        LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
+                            .frame(height: h * 0.22)
+                        Color.black
+                        LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
+                            .frame(height: fade)
+                    }
+                    .frame(height: max(h / 2 + below, h * 0.22 + fade))
+                }
             }
 
             flipHint

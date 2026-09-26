@@ -16,6 +16,8 @@ struct LensButton: View {
     let model: ZoomScrubModel
     /// True while the ruler is showing (it lingers briefly after release).
     let isExpanded: Bool
+    /// Room below the button's centre the ruler may use (see `ZoomRuler.maxBelow`).
+    var rulerMaxBelow: CGFloat = .infinity
     /// Tap with no drag: `true` when the ruler was already out.
     let onTap: (_ whileExpanded: Bool) -> Void
     let onScrubBegin: () -> Void
@@ -40,7 +42,7 @@ struct LensButton: View {
     var body: some View {
         ZStack {
             if isExpanded {
-                ZoomRuler(model: model)
+                ZoomRuler(model: model, maxBelow: rulerMaxBelow)
                     .frame(width: Self.rulerSize.width, height: Self.rulerSize.height)
                     .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }

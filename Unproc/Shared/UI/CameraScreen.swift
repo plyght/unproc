@@ -447,6 +447,11 @@ struct CameraScreen: View {
                 current: camera.currentLens,
                 model: zoomScrub,
                 isExpanded: zoomDialVisible,
+                // 16:9: the button floats over the image; keep the ruler above the
+                // line where the image meets the black.
+                rulerMaxBelow: m.barOverlap > 0
+                    ? max(m.vfTop + m.vfHeight - (m.barTop + m.barHeight / 2), 0)
+                    : .infinity,
                 onTap: { whileExpanded in
                     if whileExpanded {
                         zoomHideTask?.cancel()
