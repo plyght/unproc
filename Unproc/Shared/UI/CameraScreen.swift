@@ -283,7 +283,7 @@ struct CameraScreen: View {
                 // Tall frame: soften the top and bottom edges so the frame melts into
                 // the black and the floating controls sit on calm image. Progressive
                 // (Glur backdrop) blur plus a gentle darkening, both on smooth ramps.
-                GlurView(radius: 10, mask: .linear(stops: [
+                GlurView(radius: 6, mask: .linear(stops: [
                     .init(intensity: 1, location: 0),
                     .init(intensity: 0, location: 0.13),
                     .init(intensity: 0, location: 0.80),
