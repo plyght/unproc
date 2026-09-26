@@ -2,6 +2,7 @@ import CoreGraphics
 import CoreVideo
 import Foundation
 import Vision
+import os
 
 /// Follows a subject across preview frames with Vision's object tracker.
 ///
@@ -41,6 +42,7 @@ final class SubjectTracker: @unchecked Sendable {
         let observation = VNDetectedObjectObservation(boundingBox: ViewfinderGeometry.visionRect(fromViewfinder: seed))
         let newRequest = VNTrackObjectRequest(detectedObjectObservation: observation)
         newRequest.trackingLevel = .accurate
+        Log.camera.debug("tracker: vision start seed=\(String(describing: seed), privacy: .public)")
         lock.withLock {
             request = newRequest
             sequenceHandler = VNSequenceRequestHandler()
@@ -84,6 +86,7 @@ final class SubjectTracker: @unchecked Sendable {
             try sequenceHandler.perform([request], on: pixelBuffer, orientation: .up)
             observation = request.results?.first as? VNDetectedObjectObservation
         } catch {
+            Log.camera.error("tracker: vision perform failed: \(Log.describe(error), privacy: .public)")
             observation = nil
         }
 
@@ -98,6 +101,8 @@ final class SubjectTracker: @unchecked Sendable {
             request.inputObservation = observation
             handler?(ViewfinderGeometry.viewfinderRect(fromVision: observation.boundingBox))
         } else {
+            let confidence = observation?.confidence ?? -1
+            Log.camera.info("tracker: lost (confidence=\(confidence, privacy: .public) min=\(self.minimumConfidence, privacy: .public))")
             stop()
             handler?(nil)
         }

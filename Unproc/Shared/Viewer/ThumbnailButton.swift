@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import os
 
 /// The small rounded thumbnail of the latest photo on the camera screen.
 /// Tapping it opens `PhotoViewer`; the image carries the shared hero id.
@@ -33,7 +34,10 @@ struct ThumbnailButton: View {
         let shape = RoundedRectangle(cornerRadius: corner, style: .continuous)
 
         Button {
-            guard latest != nil else { return }
+            guard latest != nil else {
+                Log.viewer.info("thumbnail: tap ignored, no photos")
+                return
+            }
             withAnimation(ViewerStyle.heroAnimation(reduceMotion: reduceMotion)) {
                 ViewerHeroState.shared.setOpen(true, for: namespace)
                 action()

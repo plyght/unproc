@@ -267,18 +267,31 @@ struct ZoomRuler: View {
         centre + (trackPosition - model.position) - model.stretch
     }
 
+    /// Loupe: how much an item `d` points from the centre is magnified. Strong
+    /// while dragging, gentle when the ruler is just showing.
+    private func magnification(at d: CGFloat) -> CGFloat {
+        let strength: CGFloat = model.isActive ? 0.95 : 0.35
+        return 1 + strength * exp(-pow(d / 46, 2))
+    }
+
+    /// Items brighten toward the centre.
+    private func brightness(at d: CGFloat) -> Double {
+        Double(0.22 + 0.68 * exp(-pow(d / 70, 2)))
+    }
+
     private func draw(in context: inout GraphicsContext, size: CGSize) {
         let cy = size.height / 2
         let cx = size.width / 2
-        // Keep the readout clear.
-        let clearance: CGFloat = 16
+        // Keep the (growing) readout clear.
+        let clearance: CGFloat = model.isActive ? 20 : 16
 
-        // Centre marks either side of the readout.
+        // Centre marks either side of the readout; they reach in while dragging.
+        let markLength: CGFloat = model.isActive ? 8 : 5
         for side in [-1.0, 1.0] {
             var mark = Path()
             let x0 = cx + CGFloat(side) * (size.width / 2 - 2)
             mark.move(to: CGPoint(x: x0, y: cy))
-            mark.addLine(to: CGPoint(x: x0 - CGFloat(side) * 5, y: cy))
+            mark.addLine(to: CGPoint(x: x0 - CGFloat(side) * markLength, y: cy))
             context.stroke(mark, with: .color(Theme.accent), style: StrokeStyle(lineWidth: 2, lineCap: .round))
         }
 
@@ -290,20 +303,23 @@ struct ZoomRuler: View {
             for step in 1..<8 {
                 let z = stops[i] * pow(stops[i + 1] / stops[i], CGFloat(step) / 8)
                 let py = y(for: model.position(forZoom: z), centre: cy)
-                guard py > -4, py < size.height + 4, abs(py - cy) > clearance else { continue }
+                let d = abs(py - cy)
+                guard py > -4, py < size.height + 4, d > clearance else { continue }
+                let half = 4 * magnification(at: d)
                 var tick = Path()
-                tick.move(to: CGPoint(x: cx - 4, y: py))
-                tick.addLine(to: CGPoint(x: cx + 4, y: py))
-                context.stroke(tick, with: .color(.white.opacity(0.3)), lineWidth: 1)
+                tick.move(to: CGPoint(x: cx - half, y: py))
+                tick.addLine(to: CGPoint(x: cx + half, y: py))
+                context.stroke(tick, with: .color(.white.opacity(brightness(at: d) * 0.55)), lineWidth: 1)
             }
         }
-        // Stops: labels on the scale itself.
+        // Stops: labels on the scale itself, swelling as they near the centre.
         for (i, stop) in stops.enumerated() {
             let py = y(for: model.position(ofStop: i), centre: cy)
-            guard py > -12, py < size.height + 12, abs(py - cy) > clearance else { continue }
+            let d = abs(py - cy)
+            guard py > -14, py < size.height + 14, d > clearance else { continue }
             let text = Text(ZoomDial.label(stop))
-                .font(Theme.mono(9, weight: .bold))
-                .foregroundStyle(Color.white.opacity(0.8))
+                .font(Theme.mono(9 * magnification(at: d), weight: .bold))
+                .foregroundStyle(Color.white.opacity(0.25 + brightness(at: d) * 0.75))
             context.draw(text, at: CGPoint(x: cx, y: py))
         }
     }

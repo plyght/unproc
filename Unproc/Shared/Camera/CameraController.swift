@@ -2,6 +2,7 @@ import AVFoundation
 import CoreImage
 import Foundation
 import Observation
+import os
 
 /// The camera, as seen by the UI. All state is MainActor-observable; the actual
 /// `AVCaptureSession` work happens on `CameraEngine`'s serial session queue.
@@ -62,6 +63,7 @@ final class CameraController {
     /// active): a running session is left alone, a stopped or interrupted one is
     /// restarted. Selects `preferredLensID` on first start, else "back.wide".
     func start(preferredLensID: String?, rawFlavor: RawFlavor) async {
+        Log.camera.info("controller: start preferred=\(preferredLensID ?? "nil", privacy: .public) flavor=\(rawFlavor.rawValue, privacy: .public) inProgress=\(self.startTask != nil, privacy: .public) demo=\(self.demo != nil, privacy: .public)")
         if let startTask {
             await startTask.value
             return
@@ -75,6 +77,7 @@ final class CameraController {
     }
 
     func stop() {
+        Log.camera.info("controller: stop status=\(String(describing: self.status), privacy: .public)")
         if let demo {
             demo.stop()
             status = .idle
@@ -92,23 +95,29 @@ final class CameraController {
             return
         }
         guard await Self.requestAuthorization() else {
+            Log.camera.error("controller: camera not authorized")
             status = .unauthorized
             return
         }
         if lenses.isEmpty {
             lenses = await engine.discoverLenses()
+            let list = lenses.map(CameraLogText.lens).joined(separator: " ")
+            Log.camera.notice("controller: lenses \(list, privacy: .public)")
         }
         guard let lens = resolveLens(preferredLensID) else {
+            Log.camera.error("controller: no camera available (lenses=\(self.lenses.count, privacy: .public))")
             status = .failed("No camera available")
             return
         }
         switch await engine.start(lens: lens, flavor: flavor, intent: makeIntent()) {
         case let .started(active, ranges, isRunning):
+            Log.camera.notice("controller: started lens=\(active.id, privacy: .public) running=\(isRunning, privacy: .public)")
             currentLens = active
             apply(ranges)
             hasStarted = true
             status = isRunning ? .running : .idle
         case let .failed(message):
+            Log.camera.error("controller: start failed: \(message, privacy: .public)")
             status = .failed(message)
         }
     }
@@ -126,17 +135,22 @@ final class CameraController {
             return
         }
         currentLens = lens
+        Log.camera.info("controller: demo start lens=\(lens.id, privacy: .public)")
         demo.start(lens: lens)
         hasStarted = true
         status = .running
     }
 
     private static func requestAuthorization() async -> Bool {
-        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        let current = AVCaptureDevice.authorizationStatus(for: .video)
+        Log.camera.info("controller: camera authorization=\(current.rawValue, privacy: .public)")
+        switch current {
         case .authorized:
             return true
         case .notDetermined:
-            return await AVCaptureDevice.requestAccess(for: .video)
+            let granted = await AVCaptureDevice.requestAccess(for: .video)
+            Log.camera.notice("controller: camera access prompt granted=\(granted, privacy: .public)")
+            return granted
         default:
             return false
         }
@@ -163,7 +177,12 @@ final class CameraController {
         // Known lenses, or a continuous-zoom crop of a known physical camera.
         let known = lenses.first(where: { $0.id == lens.id })
         let zoomCrop = lenses.contains(where: { $0.deviceID == lens.deviceID && $0.position == lens.position }) ? lens : nil
-        guard let target = known ?? zoomCrop ?? (lenses.isEmpty ? lens : nil) else { return }
+        guard let target = known ?? zoomCrop ?? (lenses.isEmpty ? lens : nil) else {
+            Log.camera.error("controller: select unknown lens \(CameraLogText.lens(lens), privacy: .public)")
+            return
+        }
+        let fromID = currentLens?.id ?? "nil"
+        Log.camera.info("controller: select \(fromID, privacy: .public) -> \(target.id, privacy: .public)")
         stopTrackingState()
         focus.point = nil
         if let demo {
@@ -173,13 +192,14 @@ final class CameraController {
         }
         switch await engine.select(target, intent: makeIntent()) {
         case .notConfigured:
+            Log.camera.info("controller: select \(target.id, privacy: .public) stored (not configured)")
             currentLens = target
         case let .switched(active, ranges):
             currentLens = active
             apply(ranges)
             if !zoomFromCameraControl { engine.updateControlZoom(Float(active.zoom)) }
-        case .failed:
-            break
+        case let .failed(message):
+            Log.camera.error("controller: select \(target.id, privacy: .public) failed: \(message, privacy: .public)")
         }
     }
 
@@ -206,6 +226,7 @@ final class CameraController {
     @ObservationIgnored private var zoomFromCameraControl = false
 
     private func setZoom(_ zoom: CGFloat, fromCameraControl: Bool) {
+        Log.camera.debug("zoom: request \(Double(zoom), privacy: .public) cameraControl=\(fromCameraControl, privacy: .public) busy=\(self.isApplyingZoom, privacy: .public)")
         zoomFromCameraControl = fromCameraControl
         pendingZoom = zoom
         guard !isApplyingZoom else { return }
@@ -214,6 +235,7 @@ final class CameraController {
             while let next = pendingZoom {
                 pendingZoom = nil
                 if let lens = lensForZoom(next), lens.id != currentLens?.id {
+                    Log.camera.debug("zoom: \(Double(next), privacy: .public) -> lens \(lens.id, privacy: .public) crop=\(Double(lens.crop), privacy: .public)")
                     await select(lens)
                 }
             }
@@ -245,6 +267,7 @@ final class CameraController {
     }
 
     func setRawFlavor(_ flavor: RawFlavor) async {
+        Log.camera.info("controller: raw flavor \(flavor.rawValue, privacy: .public)")
         rawFlavor = flavor
         guard demo == nil else { return }
         await engine.setRawFlavor(flavor)
@@ -357,6 +380,7 @@ final class CameraController {
     }
 
     private func revertToAuto() {
+        Log.camera.info("controller: pro off, reverting to auto")
         exposure.manualAperture = nil
         exposure.manualISO = nil
         exposure.manualShutter = nil
@@ -382,11 +406,10 @@ final class CameraController {
     /// format only matters to the caller); processed HEVC otherwise (front).
     /// Calls are serialized in order, so rapid presses never lose a frame.
     func capture(output: OutputFormat) async throws -> CapturedFrame {
-        _ = output
         let previous = captureTail
         let task = Task { () async throws -> CapturedFrame in
             await previous?.value
-            return try await self.performCapture()
+            return try await self.performCapture(output: output)
         }
         captureTail = Task {
             _ = try? await task.value
@@ -394,12 +417,18 @@ final class CameraController {
         return try await task.value
     }
 
-    private func performCapture() async throws -> CapturedFrame {
-        guard let lens = currentLens else { throw UnprocError.cameraUnavailable }
+    private func performCapture(output: OutputFormat) async throws -> CapturedFrame {
+        guard let lens = currentLens else {
+            Log.capture.error("controller: capture with no current lens (status=\(String(describing: self.status), privacy: .public))")
+            throw UnprocError.cameraUnavailable
+        }
+        Log.capture.info("controller: capture lens=\(lens.id, privacy: .public) output=\(String(describing: output), privacy: .public)")
         if let demo {
-            return try await demo.capture(lens: lens, exposureDuration: exposure.shutter, iso: exposure.iso)
+            return try await demo.capture(lens: lens, exposureDuration: exposure.shutter, iso: exposure.iso,
+                                          withRAW: output == .raw)
         }
         let seconds = await engine.prepareCaptureExposure()
+        Log.capture.debug("controller: shutter open duration=\(String(describing: seconds), privacy: .public)")
         openShutterDuration = seconds
         defer {
             engine.restorePreviewExposure()
@@ -419,15 +448,18 @@ final class CameraController {
                                 ratioTitles: [String] = [], ratioIndex: Int = 0,
                                 onRatio: @escaping @Sendable (Int) -> Void = { _ in }) {
         guard demo == nil else { return }
+        Log.controls.info("controller: install capture controls looks=\(lookCodes.count, privacy: .public) sel=\(selectedIndex, privacy: .public) ratios=\(ratioTitles.count, privacy: .public) ratioSel=\(ratioIndex, privacy: .public)")
         let config = CaptureControlsConfig(
             zoomStops: zoomStops.map { Float($0) },
             zoom: Float(currentLens?.zoom ?? 1),
             onZoom: { [weak self] value in
+                Log.controls.debug("controls: zoom action \(value, privacy: .public)")
                 Task { @MainActor in self?.setZoom(CGFloat(value), fromCameraControl: true) }
             },
             biasRange: exposure.biasRange,
             bias: exposure.bias,
             onBias: { [weak self] value in
+                Log.controls.debug("controls: bias action \(value, privacy: .public)")
                 Task { @MainActor in self?.setExposureBias(value, fromCameraControl: true) }
             },
             lookCodes: lookCodes,
@@ -458,10 +490,12 @@ final class CameraController {
         guard demo == nil else { return }
         switch event {
         case let .running(isRunning):
+            Log.camera.info("controller: event running=\(isRunning, privacy: .public) status=\(String(describing: self.status), privacy: .public)")
             guard hasStarted, status != .unauthorized else { return }
             if case .failed = status, !isRunning { return }
             status = isRunning ? .running : .idle
         case let .failed(message):
+            Log.camera.error("controller: event failed \(message, privacy: .public)")
             status = .failed(message)
         case let .live(values):
             applyLive(values)
@@ -474,6 +508,7 @@ final class CameraController {
             focus.trackedRect = rect
             focus.point = CGPoint(x: rect.midX, y: rect.midY)
         case .trackingLost:
+            Log.camera.info("controller: tracking lost (tracking=\(self.focus.isTracking, privacy: .public))")
             guard focus.isTracking else { return }
             focus.isTracking = false
             focus.trackedRect = nil

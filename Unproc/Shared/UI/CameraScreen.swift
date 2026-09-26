@@ -1,6 +1,7 @@
 import SwiftUI
 import AVKit
 import GlurBackdrop
+import os
 
 /// The whole camera: viewfinder, status badge, settings menu, PRO controls,
 /// bottom bar (thumbnail · shutter · lens) and the photo viewer on top.
@@ -155,6 +156,7 @@ struct CameraScreen: View {
         .overlay {
             if showViewer {
                 PhotoViewer(store: store, namespace: heroNamespace) {
+                    Log.ui.info("ui: viewer close")
                     withAnimation(Theme.snappy) { showViewer = false }
                 }
                 .transition(.opacity)
@@ -183,6 +185,7 @@ struct CameraScreen: View {
         .sensoryFeedback(.error, trigger: shutter.lastError) { _, new in new != nil }
         // Hardware shutter: Camera Control, volume buttons, AirPods.
         .onCameraCaptureEvent { event in
+            Log.ui.debug("ui: hardware capture event phase=\(String(describing: event.phase), privacy: .public)")
             if event.phase == .ended {
                 hardwareShutter()
             }
@@ -192,7 +195,8 @@ struct CameraScreen: View {
             LaunchArguments.applyResetIfNeeded()
             await activate()
         }
-        .onChange(of: scenePhase) { _, phase in
+        .onChange(of: scenePhase) { old, phase in
+            Log.ui.notice("ui: scenePhase \(String(describing: old), privacy: .public) -> \(String(describing: phase), privacy: .public)")
             switch phase {
             case .active: Task { await activate() }
             case .background: deactivate()
@@ -202,6 +206,7 @@ struct CameraScreen: View {
         // Settings → camera.
         .modifier(Observers(camera: camera, settings: settings, shutter: shutter))
         .onChange(of: settings.value.proMode) { _, pro in
+            Log.ui.info("settings: pro=\(pro, privacy: .public)")
             camera.proEnabled = pro
             if !pro { proExpanded = nil }
         }
@@ -227,20 +232,30 @@ struct CameraScreen: View {
                     if let id, settings.value.lensID != id { settings.value.lensID = id }
                 }
                 .onChange(of: settings.value.rawFlavor) { _, flavor in
+                    Log.ui.info("settings: rawFlavor=\(flavor.rawValue, privacy: .public)")
                     Task { await camera.setRawFlavor(flavor) }
                 }
-                .onChange(of: settings.value.accent) { _, _ in
+                .onChange(of: settings.value.output) { old, new in
+                    Log.ui.info("settings: output \(old.rawValue, privacy: .public) -> \(new.rawValue, privacy: .public)")
+                }
+                .onChange(of: settings.value.accent) { old, new in
+                    Log.ui.info("settings: accent \(old.rawValue, privacy: .public) -> \(new.rawValue, privacy: .public)")
                     DeviceAccent.refresh()
                 }
                 .onChange(of: settings.value.doubleExposure) { _, on in
+                    Log.ui.info("settings: doubleExposure=\(on, privacy: .public)")
                     if !on { shutter.cancelDoubleExposure() }
                 }
-                .onChange(of: settings.value.lookID) { _, id in
+                .onChange(of: settings.value.lookID) { old, id in
+                    Log.ui.info("settings: look \(old, privacy: .public) -> \(id, privacy: .public)")
                     if let index = LookLibrary.all.firstIndex(where: { $0.id == id }) {
                         camera.setCaptureControlsSelection(index)
+                    } else {
+                        Log.ui.error("settings: look id \(id, privacy: .public) not in library")
                     }
                 }
-                .onChange(of: settings.value.ratio) { _, ratio in
+                .onChange(of: settings.value.ratio) { old, ratio in
+                    Log.ui.info("settings: ratio \(old.rawValue, privacy: .public) -> \(ratio.rawValue, privacy: .public)")
                     camera.setCaptureControlsRatio(FrameRatio.allCases.firstIndex(of: ratio) ?? 0)
                 }
         }
@@ -278,16 +293,22 @@ struct CameraScreen: View {
             if pro {
                 // FocusOverlay works in the 3:4 sensor frame; aspect-fill that
                 // frame into the viewfinder so points line up at any ratio.
-                Color.clear
-                    .aspectRatio(Theme.frameAspect, contentMode: .fill)
-                    .overlay {
-                        FocusOverlay(
-                            point: camera.focus.point,
-                            isTracking: camera.focus.isTracking,
-                            trackedRect: camera.focus.trackedRect
-                        )
-                    }
-                    .allowsHitTesting(false)
+                // Sized explicitly inside a GeometryReader so it can never grow
+                // the viewfinder (an `.aspectRatio(.fill)` view here did, which
+                // pushed the badge and PRO chips off screen at non-4:3 ratios).
+                GeometryReader { proxy in
+                    let size = proxy.size
+                    let scale = max(size.width / Theme.frameAspect, size.height)
+                    let fill = CGSize(width: scale * Theme.frameAspect, height: scale)
+                    FocusOverlay(
+                        point: camera.focus.point,
+                        isTracking: camera.focus.isTracking,
+                        trackedRect: camera.focus.trackedRect
+                    )
+                    .frame(width: fill.width, height: fill.height)
+                    .position(x: size.width / 2, y: size.height / 2)
+                }
+                .allowsHitTesting(false)
             }
 
             if value.ratio == .sixteenNine {
@@ -435,6 +456,7 @@ struct CameraScreen: View {
     private func bottomBar(_ m: Metrics) -> some View {
         HStack(spacing: 0) {
             ThumbnailButton(store: store, namespace: heroNamespace) {
+                Log.ui.info("ui: viewer open (\(store.items.count, privacy: .public) items)")
                 closeFloating()
                 withAnimation(Theme.snappy) { showViewer = true }
             }
@@ -503,6 +525,7 @@ struct CameraScreen: View {
     // MARK: - Actions
 
     private func hardwareShutter() {
+        Log.ui.info("ui: hardware shutter (viewer open=\(showViewer, privacy: .public))")
         if showViewer {
             withAnimation(Theme.snappy) { showViewer = false }
         }
@@ -518,6 +541,7 @@ struct CameraScreen: View {
     private func beginZoomScrub() {
         zoomHideTask?.cancel()
         let lens = camera.currentLens
+        Log.ui.info("ui: zoom scrub begin lens=\(lens?.id ?? "nil", privacy: .public) stops=\(String(describing: camera.zoomStops), privacy: .public)")
         zoomScrub.begin(stops: camera.zoomStops, zoom: lens?.zoom ?? 1, isFront: lens?.isFront == true)
         if !zoomDialVisible {
             withAnimation(Theme.snappy) { zoomDialVisible = true }
@@ -544,6 +568,7 @@ struct CameraScreen: View {
 
     private func endZoomScrub() {
         let action = zoomScrub.end()
+        Log.ui.info("ui: zoom scrub end action=\(String(describing: action), privacy: .public)")
         withAnimation(Theme.exit) { perform(action) }
         // Linger so the ruler can be grabbed again, then fold away.
         scheduleRulerHide(after: .milliseconds(1600))
@@ -554,8 +579,10 @@ struct CameraScreen: View {
         case .zoom(let zoom)?:
             camera.setZoom(zoom)
         case .flip(.front)?:
+            Log.ui.info("ui: zoom flip to front")
             if let front = camera.lenses.first(where: \.isFront) { select(front) }
         case .flip(.back)?:
+            Log.ui.info("ui: zoom flip to back")
             let back = camera.lenses.first { $0.id == "back.wide" } ?? camera.lenses.first { !$0.isFront }
             if let back { select(back) }
         case nil:
@@ -598,9 +625,16 @@ struct CameraScreen: View {
     // MARK: - Lifecycle
 
     private func activate() async {
-        guard !isActivating else { return }
+        guard !isActivating else {
+            Log.ui.debug("ui: activate skipped, already activating")
+            return
+        }
         isActivating = true
         defer { isActivating = false }
+        let clock = ContinuousClock()
+        let began = clock.now
+        let snapshot = String(describing: settings.value)
+        Log.ui.notice("ui: activate status=\(String(describing: camera.status), privacy: .public) locked=\(hooks.isLockedCapture, privacy: .public) settings=\(snapshot, privacy: .public)")
 
         hooks.setIdleTimerDisabled(true)
         camera.proEnabled = settings.value.proMode
@@ -610,9 +644,12 @@ struct CameraScreen: View {
         camera.proEnabled = settings.value.proMode
         installCaptureControls()
         await store.reload()
+        let ms = CameraLogText.ms(clock.now - began)
+        Log.ui.notice("ui: activate done status=\(String(describing: camera.status), privacy: .public) lens=\(camera.currentLens?.id ?? "nil", privacy: .public) items=\(store.items.count, privacy: .public) in \(ms, privacy: .public)ms")
     }
 
     private func deactivate() {
+        Log.ui.notice("ui: deactivate")
         closeFloating()
         camera.stop()
         hooks.setIdleTimerDisabled(false)

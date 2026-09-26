@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreGraphics
 import CoreMedia
+import os
 
 /// Builds the lens list from the *physical* cameras (no virtual-device fusion).
 enum LensDiscovery {
@@ -25,8 +26,11 @@ enum LensDiscovery {
             mediaType: .video,
             position: .front
         ).devices.first
+        let backText = back.map { "\($0.deviceType.rawValue)=\($0.uniqueID)" }.joined(separator: " ")
+        Log.camera.info("lenses: back devices [\(backText, privacy: .public)] front=\(front?.uniqueID ?? "none", privacy: .public)")
 
         let zoom = zoomFactors(wide: wide, tele: tele)
+        Log.camera.info("lenses: zoom factors ultraWide=\(Double(zoom.ultraWide), privacy: .public) tele=\(Double(zoom.tele), privacy: .public)")
         var backLenses: [Lens] = []
 
         if let ultra {
@@ -54,6 +58,8 @@ enum LensDiscovery {
             backLenses.append(Lens(id: "front.wide", deviceID: front.uniqueID, position: .front,
                                    kind: .front, crop: 1, zoom: 1))
         }
+        let list = backLenses.map(CameraLogText.lens).joined(separator: " ")
+        Log.camera.notice("lenses: \(backLenses.count, privacy: .public) [\(list, privacy: .public)]")
         return backLenses
     }
 
@@ -76,6 +82,7 @@ enum LensDiscovery {
         }
 
         let triple = factors(.builtInTripleCamera)
+        Log.camera.debug("lenses: triple switch-over factors \(String(describing: triple), privacy: .public)")
         if triple.count >= 2, triple[0] > 0 {
             result.ultraWide = 1 / triple[0]
             result.tele = triple[1] / triple[0]
@@ -94,7 +101,10 @@ enum LensDiscovery {
             }
         }
         if !teleKnown, let wide, let tele, let ratio = fieldOfViewRatio(wide: wide, tele: tele) {
+            Log.camera.info("lenses: tele factor from field of view ratio \(Double(ratio), privacy: .public)")
             result.tele = ratio
+        } else if !teleKnown {
+            Log.camera.debug("lenses: tele factor unknown, default \(Double(result.tele), privacy: .public)")
         }
         result.ultraWide = round1(result.ultraWide)
         result.tele = round1(result.tele)

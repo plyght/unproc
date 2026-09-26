@@ -3,7 +3,7 @@ import CoreImage
 import Observation
 import os
 
-private let log = Logger(subsystem: "lol.peril.unproc", category: "shutter")
+private let log = Log.capture
 
 /// Runs one press of the shutter end to end:
 /// capture → develop (off main) → (double exposure) → finish with Look → sink → store reload.
@@ -53,11 +53,14 @@ final class ShutterCoordinator {
 
     func shoot() {
         guard camera.status == .running else {
-            log.notice("shoot ignored: camera status \(String(describing: self.camera.status), privacy: .public)")
+            log.notice("shutter: press ignored, camera status \(String(describing: self.camera.status), privacy: .public)")
             return
         }
         // Keep the queue shallow: at most one extra press waiting behind the active one.
-        guard inFlight < 2 else { return }
+        guard inFlight < 2 else {
+            log.notice("shutter: press dropped, queue full inFlight=\(self.inFlight, privacy: .public)")
+            return
+        }
 
         let settings = SettingsStore.shared.value
         let look = LookLibrary.look(id: settings.lookID)
@@ -67,18 +70,22 @@ final class ShutterCoordinator {
         inFlight += 1
         pressCount += 1
         flash += 1
+        let seq = pressCount
+        log.notice("shutter: press #\(seq, privacy: .public) queue=\(self.inFlight, privacy: .public) output=\(String(describing: output), privacy: .public) look=\(look.id, privacy: .public) ratio=\(String(describing: ratio), privacy: .public) double=\(settings.doubleExposure, privacy: .public) awaitingSecond=\(self.awaitingSecondExposure, privacy: .public)")
 
         let previous = tail
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.process(output: output, look: look, ratio: ratio, after: previous)
+            await self.process(seq: seq, output: output, look: look, ratio: ratio, after: previous)
             self.inFlight -= 1
+            log.debug("shutter: #\(seq, privacy: .public) done, queue=\(self.inFlight, privacy: .public)")
         }
         tail = task
     }
 
     /// Drops a waiting first exposure.
     func cancelDoubleExposure() {
+        log.info("shutter: double exposure cancelled (had first=\(self.pendingFirst != nil, privacy: .public))")
         pendingFirst = nil
         pendingFrame = nil
         awaitingSecondExposure = false
@@ -86,15 +93,27 @@ final class ShutterCoordinator {
 
     // MARK: - Pipeline
 
-    private func process(output: OutputFormat, look: Look, ratio: FrameRatio, after previous: Task<Void, Never>?) async {
+    private func process(seq: Int, output: OutputFormat, look: Look, ratio: FrameRatio, after previous: Task<Void, Never>?) async {
+        let clock = ContinuousClock()
+        let began = clock.now
+        var stage = began
+        func lap() -> Double {
+            let now = clock.now
+            defer { stage = now }
+            return CameraLogText.ms(now - stage)
+        }
+
         // 1. Capture (the camera serialises concurrent requests).
         let frame: CapturedFrame
         do {
             frame = try await camera.capture(output: output)
-            log.notice("captured raw=\(frame.rawDNG?.count ?? -1) processed=\(frame.processed?.count ?? -1)")
+            let captureMs = lap()
+            log.notice("shutter: #\(seq, privacy: .public) captured raw=\(frame.rawDNG?.count ?? -1, privacy: .public) flavor=\(frame.rawFlavor?.rawValue ?? "nil", privacy: .public) processed=\(frame.processed?.count ?? -1, privacy: .public) lens=\(frame.lens.id, privacy: .public) shutter=\(frame.exposureDuration ?? -1, privacy: .public) iso=\(frame.iso ?? -1, privacy: .public) in \(captureMs, privacy: .public)ms")
         } catch {
+            let captureMs = lap()
+            log.error("shutter: #\(seq, privacy: .public) capture failed after \(captureMs, privacy: .public)ms: \(Log.describe(error), privacy: .public)")
             await previous?.value
-            report(error)
+            report(error, stage: "capture", seq: seq)
             return
         }
 
@@ -103,18 +122,24 @@ final class ShutterCoordinator {
         do {
             let shot = try await ShutterWork.develop(frame)
             developed = .success(ShotImage(image: RatioCrop.crop(shot.image, to: ratio)))
+            let developMs = lap()
+            log.info("shutter: #\(seq, privacy: .public) developed extent=\(String(describing: shot.image.extent), privacy: .public) ratio=\(String(describing: ratio), privacy: .public) in \(developMs, privacy: .public)ms")
         } catch {
             developed = .failure(error)
+            let developMs = lap()
+            log.error("shutter: #\(seq, privacy: .public) develop failed after \(developMs, privacy: .public)ms: \(Log.describe(error), privacy: .public)")
         }
 
         // 3. From here on, strictly in press order.
         await previous?.value
+        let waitMs = lap()
+        log.debug("shutter: #\(seq, privacy: .public) waited \(waitMs, privacy: .public)ms for earlier press")
 
         let image: ShotImage
         switch developed {
         case .success(let d): image = d
         case .failure(let error):
-            report(error)
+            report(error, stage: "develop", seq: seq)
             return
         }
 
@@ -129,12 +154,16 @@ final class ShutterCoordinator {
                 pendingFirst = nil
                 pendingFrame = nil
                 awaitingSecondExposure = false
+                log.notice("shutter: #\(seq, privacy: .public) double exposure: second frame, blended")
             } else {
                 pendingFirst = image
                 pendingFrame = frame
                 awaitingSecondExposure = true
+                log.notice("shutter: #\(seq, privacy: .public) double exposure: first frame held, awaiting second")
                 return
             }
+        } else if pendingFirst != nil {
+            log.debug("shutter: #\(seq, privacy: .public) double exposure off but a first frame is still held")
         }
 
         // 4. Encode off main.
@@ -143,8 +172,12 @@ final class ShutterCoordinator {
         let photo: DevelopedPhoto
         do {
             photo = try await ShutterWork.finish(toFinish, look: look, frame: frame, includeDNG: includeDNG)
+            let finishMs = lap()
+            log.info("shutter: #\(seq, privacy: .public) finished jpeg=\(photo.jpeg.count, privacy: .public)B dng=\(photo.dng?.count ?? 0, privacy: .public)B blend=\(isBlend, privacy: .public) in \(finishMs, privacy: .public)ms")
         } catch {
-            report(error)
+            let finishMs = lap()
+            log.error("shutter: #\(seq, privacy: .public) finish failed after \(finishMs, privacy: .public)ms: \(Log.describe(error), privacy: .public)")
+            report(error, stage: "finish", seq: seq)
             return
         }
 
@@ -152,17 +185,22 @@ final class ShutterCoordinator {
         do {
             let id = try await sink.save(photo)
             savedCount += 1
-            log.notice("saved \(id, privacy: .public) jpeg=\(photo.jpeg.count)")
+            let saveMs = lap()
+            log.notice("shutter: #\(seq, privacy: .public) saved \(id, privacy: .public) jpeg=\(photo.jpeg.count, privacy: .public)B in \(saveMs, privacy: .public)ms (total saved \(self.savedCount, privacy: .public))")
             await store.reload()
-            log.notice("store reloaded: \(self.store.items.count) items")
+            let reloadMs = lap()
+            let totalMs = CameraLogText.ms(clock.now - began)
+            log.notice("shutter: #\(seq, privacy: .public) store reloaded \(self.store.items.count, privacy: .public) items in \(reloadMs, privacy: .public)ms; total \(totalMs, privacy: .public)ms")
         } catch {
-            report(error)
+            let saveMs = lap()
+            log.error("shutter: #\(seq, privacy: .public) save failed after \(saveMs, privacy: .public)ms: \(Log.describe(error), privacy: .public)")
+            report(error, stage: "save", seq: seq)
         }
     }
 
-    private func report(_ error: Error) {
+    private func report(_ error: Error, stage: String = "unknown", seq: Int = 0) {
         let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-        log.error("shot failed: \(message, privacy: .public)")
+        log.error("shutter: #\(seq, privacy: .public) shot failed at \(stage, privacy: .public): \(message, privacy: .public) [\(Log.describe(error), privacy: .public)]")
         lastError = message.uppercased()
         errorClearTask?.cancel()
         errorClearTask = Task { @MainActor [weak self] in

@@ -3,6 +3,7 @@ import Foundation
 import Observation
 import Photos
 import UIKit
+import os
 
 /// The user's photo library, newest first (most recent ~300 images).
 @MainActor
@@ -34,12 +35,17 @@ final class LibraryPhotoStore: PhotoStore {
     // MARK: PhotoStore
 
     func reload() async {
+        let clock = ContinuousClock()
+        let began = clock.now
         var status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         if status == .notDetermined {
+            Log.viewer.notice("library: requesting photo authorization")
             status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+            Log.viewer.notice("library: authorization answer=\(status.rawValue, privacy: .public)")
         }
         authorization = status
         guard status == .authorized || status == .limited else {
+            Log.viewer.error("library: reload without access, authorization=\(status.rawValue, privacy: .public) (0 notDetermined, 1 restricted, 2 denied, 3 authorized, 4 limited)")
             assets = [:]
             if !items.isEmpty { items = [] }
             return
@@ -47,6 +53,7 @@ final class LibraryPhotoStore: PhotoStore {
         if !isObserving {
             isObserving = true
             PHPhotoLibrary.shared().register(observer)
+            Log.viewer.info("library: registered change observer")
         }
 
         let options = PHFetchOptions()
@@ -64,35 +71,54 @@ final class LibraryPhotoStore: PhotoStore {
             newItems.append(PhotoItem(id: id, source: .asset(id), createdAt: asset.creationDate ?? .distantPast))
         }
         assets = newAssets
-        if newItems != items { items = newItems }
+        let changed = newItems != items
+        if changed { items = newItems }
+        let ms = CameraLogText.ms(clock.now - began)
+        Log.viewer.info("library: reload count=\(newItems.count, privacy: .public) changed=\(changed, privacy: .public) authorization=\(status.rawValue, privacy: .public) newest=\(newItems.first?.id ?? "none", privacy: .public) in \(ms, privacy: .public)ms")
     }
 
     /// `side` is in points.
     func thumbnail(for item: PhotoItem, side: CGFloat) async -> UIImage? {
-        guard let asset = asset(for: item) else { return nil }
+        guard let asset = asset(for: item) else {
+            Log.viewer.error("library: thumbnail, no asset for \(item.id, privacy: .public)")
+            return nil
+        }
         let pixels = max(side, 1) * 3
         let options = PHImageRequestOptions()
         options.deliveryMode = .highQualityFormat
         options.resizeMode = .fast
         options.isNetworkAccessAllowed = true
-        return await requestImage(for: asset,
-                                  targetSize: CGSize(width: pixels, height: pixels),
-                                  contentMode: .aspectFill,
-                                  options: options)
+        let image = await requestImage(for: asset,
+                                       targetSize: CGSize(width: pixels, height: pixels),
+                                       contentMode: .aspectFill,
+                                       options: options)
+        if image == nil {
+            Log.viewer.error("library: thumbnail request returned nil for \(item.id, privacy: .public)")
+        }
+        return image
     }
 
     func fullImage(for item: PhotoItem) async -> UIImage? {
-        guard let asset = asset(for: item) else { return nil }
+        guard let asset = asset(for: item) else {
+            Log.viewer.error("library: full image, no asset for \(item.id, privacy: .public)")
+            return nil
+        }
         let options = PHImageRequestOptions()
         options.deliveryMode = .highQualityFormat
         options.resizeMode = .fast
         options.isNetworkAccessAllowed = true
         // Big enough for 5× zoom on a phone without decoding 48 MP into memory.
         let longSide: CGFloat = 4096
-        return await requestImage(for: asset,
-                                  targetSize: CGSize(width: longSide, height: longSide),
-                                  contentMode: .aspectFit,
-                                  options: options)
+        let image = await requestImage(for: asset,
+                                       targetSize: CGSize(width: longSide, height: longSide),
+                                       contentMode: .aspectFit,
+                                       options: options)
+        if let image {
+            Log.viewer.debug("library: full image \(item.id, privacy: .public) size=\(String(describing: image.size), privacy: .public)")
+        } else {
+            Log.viewer.error("library: full image request returned nil for \(item.id, privacy: .public)")
+        }
+        return image
     }
 
     /// iOS presents its own confirmation; throws if the user declines it.
@@ -101,11 +127,21 @@ final class LibraryPhotoStore: PhotoStore {
             if case .asset(let id) = $0.source { return id }
             return nil
         }
-        guard !ids.isEmpty else { return }
-        try await PHPhotoLibrary.shared().performChanges {
-            let doomed = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
-            PHAssetChangeRequest.deleteAssets(doomed as NSFastEnumeration)
+        guard !ids.isEmpty else {
+            Log.viewer.notice("library: delete called with no asset items (\(items.count, privacy: .public) given)")
+            return
         }
+        Log.viewer.notice("library: deleting \(ids.count, privacy: .public) assets")
+        do {
+            try await PHPhotoLibrary.shared().performChanges {
+                let doomed = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+                PHAssetChangeRequest.deleteAssets(doomed as NSFastEnumeration)
+            }
+        } catch {
+            Log.viewer.error("library: delete of \(ids.count, privacy: .public) failed/declined: \(Log.describe(error), privacy: .public)")
+            throw error
+        }
+        Log.viewer.notice("library: deleted \(ids.count, privacy: .public) assets")
         let removed = Set(ids)
         for id in ids { assets[id] = nil }
         self.items.removeAll { removed.contains($0.id) }
@@ -149,6 +185,10 @@ final class LibraryPhotoStore: PhotoStore {
                 let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
                 let cancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
                 let failed = info?[PHImageErrorKey] != nil
+                if failed || cancelled {
+                    let error = info?[PHImageErrorKey] as? Error
+                    Log.viewer.error("library: image request failed=\(failed, privacy: .public) cancelled=\(cancelled, privacy: .public) inCloud=\((info?[PHImageResultIsInCloudKey] as? Bool) ?? false, privacy: .public) error=\(error.map(Log.describe) ?? "none", privacy: .public)")
+                }
                 if degraded && !cancelled && !failed {
                     // A better image will follow; keep this one as a fallback.
                     gate.remember(image)
@@ -191,6 +231,7 @@ private final class LibraryChangeObserver: NSObject, PHPhotoLibraryChangeObserve
     var onChange: (@Sendable () -> Void)?
 
     func photoLibraryDidChange(_ changeInstance: PHChange) {
+        Log.viewer.debug("library: change notification")
         onChange?()
     }
 }

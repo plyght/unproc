@@ -2,6 +2,8 @@ import AVFoundation
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import Foundation
+import ImageIO
+import os
 
 extension CameraController {
     /// True in the Simulator, or on device when launched with `-UNPROC_DEMO`.
@@ -71,6 +73,7 @@ final class SimulatorCamera: @unchecked Sendable {
     }
 
     func start(lens: Lens) {
+        Log.camera.info("demo: start lens=\(lens.id, privacy: .public) dng=\(Self.demoDNG != nil, privacy: .public)")
         queue.async { [self] in
             self.lens = lens
             currentFrame = frame(for: lens)
@@ -86,6 +89,7 @@ final class SimulatorCamera: @unchecked Sendable {
     }
 
     func setLens(_ lens: Lens) {
+        Log.camera.info("demo: lens \(lens.id, privacy: .public) zoom=\(Double(lens.zoom), privacy: .public)")
         queue.async { [self] in
             self.lens = lens
             currentFrame = frame(for: lens)
@@ -93,21 +97,43 @@ final class SimulatorCamera: @unchecked Sendable {
     }
 
     func stop() {
+        Log.camera.info("demo: stop")
         queue.async { [self] in
             timer?.cancel()
             timer = nil
         }
     }
 
-    func capture(lens: Lens, exposureDuration: Double, iso: Float) async throws -> CapturedFrame {
+    /// A real iPhone DNG bundled into simulator/test builds only (CI downloads
+    /// it; see the workflow). When present and RAW is requested, captures
+    /// return it so RAW development and the RAW+JPEG save path get exercised.
+    static let demoDNG: Data? = Bundle.main.url(forResource: "DemoRAW", withExtension: "dng")
+        .flatMap { try? Data(contentsOf: $0) }
+
+    func capture(lens: Lens, exposureDuration: Double, iso: Float, withRAW: Bool = false) async throws -> CapturedFrame {
+        if withRAW, let dng = Self.demoDNG {
+            Log.camera.info("demo: capture RAW (bundled DNG, \(dng.count) bytes)")
+            return CapturedFrame(
+                rawDNG: dng,
+                rawFlavor: .bayer,
+                processed: nil,
+                metadata: Self.metadata(of: dng),
+                lens: lens,
+                exposureDuration: exposureDuration,
+                iso: iso,
+                capturedAt: Date()
+            )
+        }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<CapturedFrame, Error>) in
             queue.async { [self] in
                 let activeLens = self.lens ?? lens
                 let image = currentFrame ?? frame(for: activeLens)
                 guard let data = context.jpegRepresentation(of: image, colorSpace: colorSpace, options: [:]) else {
+                    Log.camera.error("demo: capture JPEG encode failed extent=\(String(describing: image.extent), privacy: .public)")
                     continuation.resume(throwing: UnprocError.captureFailed("Demo frame could not be encoded"))
                     return
                 }
+                Log.camera.info("demo: capture processed lens=\(activeLens.id, privacy: .public) bytes=\(data.count, privacy: .public) withRAW=\(withRAW, privacy: .public)")
                 continuation.resume(returning: CapturedFrame(
                     rawDNG: nil,
                     rawFlavor: nil,
@@ -188,7 +214,9 @@ final class SimulatorCamera: @unchecked Sendable {
 
     private func sceneImage() -> CIImage {
         if let scene { return scene }
-        let loaded = Self.bundledScene() ?? Self.proceduralScene()
+        let bundled = Self.bundledScene()
+        let loaded = bundled ?? Self.proceduralScene()
+        Log.camera.info("demo: scene \(bundled != nil ? "bundled" : "procedural", privacy: .public) extent=\(String(describing: loaded.extent), privacy: .public)")
         scene = loaded
         return loaded
     }
@@ -256,5 +284,15 @@ final class SimulatorCamera: @unchecked Sendable {
             }
         }
         return image.cropped(to: bounds)
+    }
+}
+
+extension SimulatorCamera {
+    /// Image properties of a DNG, like `AVCapturePhoto.metadata` would give.
+    static func metadata(of data: Data) -> [String: Any] {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any]
+        else { return [:] }
+        return props
     }
 }

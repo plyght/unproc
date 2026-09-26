@@ -43,7 +43,8 @@ struct LensButton: View {
         ZStack {
             if isExpanded {
                 ZoomRuler(model: model, maxBelow: rulerMaxBelow)
-                    .frame(width: Self.rulerSize.width, height: Self.rulerSize.height)
+                    // Widens a touch while dragging so the loupe has room.
+                    .frame(width: Self.rulerSize.width + (isScrubbing ? 14 : 0), height: Self.rulerSize.height)
                     .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }
             Text(label)
@@ -53,6 +54,18 @@ struct LensButton: View {
                 .monospacedDigit()
                 .contentTransition(.numericText())
                 .animation(Theme.snappy, value: current?.id)
+                // The number grows while your finger is on it…
+                .scaleEffect(isScrubbing ? 1.42 : 1, anchor: .center)
+                .animation(.spring(response: 0.3, dampingFraction: 0.78), value: isScrubbing)
+                // …and pops as it lands on a lens stop.
+                .keyframeAnimator(initialValue: 1.0, trigger: model.detentTick) { content, scale in
+                    content.scaleEffect(scale)
+                } keyframes: { _ in
+                    KeyframeTrack {
+                        SpringKeyframe(1.14, duration: 0.08, spring: .snappy)
+                        SpringKeyframe(1.0, duration: 0.26, spring: .smooth)
+                    }
+                }
                 .frame(width: 52, height: 52)
                 // Glass only in the resting state; it melts away for the ruler.
                 .glassEffect(isExpanded ? .identity : .regular.interactive(), in: .circle)

@@ -2,6 +2,7 @@ import CoreImage
 import CoreImage.CIFilterBuiltins
 import Foundation
 import Synchronization
+import os
 
 /// The catalogue of Looks and the code that applies them.
 ///
@@ -48,9 +49,14 @@ enum LookLibrary {
     /// Builds every cube up front (call from a background queue at launch so
     /// the first swipe through Looks never stalls a frame).
     static func prewarm() {
+        let clock = ContinuousClock()
+        let began = clock.now
         for look in all where look.id != Look.zero.id {
             _ = cache.data(for: look.id)
         }
+        let ms = CameraLogText.ms(clock.now - began)
+        let built = all.count - 1
+        Log.pipeline.info("look: prewarmed \(built, privacy: .public) cubes in \(ms, privacy: .public)ms")
     }
 
     /// Raw cube bytes (RGBA float32) for a look, e.g. for tests or export.
@@ -75,12 +81,17 @@ private final class LUTCache: Sendable {
             if let d = cache.cubes[id] { return d }
             if cache.missing.contains(id) { return nil }
             guard let transform = LookRecipes.transform(for: id) else {
+                Log.pipeline.error("look: no recipe for id=\(id, privacy: .public); look will be a no-op")
                 cache.missing.insert(id)
                 return nil
             }
             // Building takes a few ms. Holding the lock means concurrent callers
             // wait for the single build instead of duplicating it.
+            let clock = ContinuousClock()
+            let began = clock.now
             let d = LUTBuilder.cube(dimension: LookLibrary.dimension, transform)
+            let ms = CameraLogText.ms(clock.now - began)
+            Log.pipeline.info("look: built cube id=\(id, privacy: .public) dim=\(LookLibrary.dimension, privacy: .public) bytes=\(d.count, privacy: .public) in \(ms, privacy: .public)ms")
             cache.cubes[id] = d
             return d
         }

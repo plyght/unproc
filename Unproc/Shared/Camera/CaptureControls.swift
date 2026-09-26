@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import os
 
 /// What the Camera Control (iPhone 16+ capture button) offers, and where its
 /// changes go. None of the controls is bound to a device, so they survive
@@ -27,10 +28,18 @@ struct CaptureControlsConfig: Sendable {
 /// Camera Control requires a controls delegate before any control is active.
 /// We don't need the callbacks, so they're no-ops.
 final class CaptureControlsDelegate: NSObject, AVCaptureSessionControlsDelegate, @unchecked Sendable {
-    func sessionControlsDidBecomeActive(_ session: AVCaptureSession) {}
-    func sessionControlsWillEnterFullscreenAppearance(_ session: AVCaptureSession) {}
-    func sessionControlsWillExitFullscreenAppearance(_ session: AVCaptureSession) {}
-    func sessionControlsDidBecomeInactive(_ session: AVCaptureSession) {}
+    func sessionControlsDidBecomeActive(_ session: AVCaptureSession) {
+        Log.controls.debug("controls: did become active")
+    }
+    func sessionControlsWillEnterFullscreenAppearance(_ session: AVCaptureSession) {
+        Log.controls.debug("controls: will enter fullscreen")
+    }
+    func sessionControlsWillExitFullscreenAppearance(_ session: AVCaptureSession) {
+        Log.controls.debug("controls: will exit fullscreen")
+    }
+    func sessionControlsDidBecomeInactive(_ session: AVCaptureSession) {
+        Log.controls.debug("controls: did become inactive")
+    }
 }
 
 /// The installed controls, kept so their values can follow on-screen changes.
@@ -57,12 +66,19 @@ enum CaptureControlsInstaller {
                         delegate: CaptureControlsDelegate,
                         delegateQueue: DispatchQueue) -> InstalledCaptureControls {
         var installed = InstalledCaptureControls()
-        guard session.supportsControls else { return installed }
+        guard session.supportsControls else {
+            Log.controls.info("controls: session does not support controls (no Camera Control)")
+            return installed
+        }
         session.setControlsDelegate(delegate, queue: delegateQueue)
 
         session.beginConfiguration()
-        defer { session.commitConfiguration() }
+        defer {
+            session.commitConfiguration()
+            Log.controls.notice("controls: installed zoom=\(installed.zoom != nil, privacy: .public) (\(installed.zoomValues.count, privacy: .public) values) exposure=\(installed.bias != nil, privacy: .public) look=\(installed.look != nil, privacy: .public) ratio=\(installed.ratio != nil, privacy: .public) total=\(session.controls.count, privacy: .public) max=\(session.maxControlsCount, privacy: .public)")
+        }
 
+        Log.controls.debug("controls: removing \(session.controls.count, privacy: .public) existing")
         for control in session.controls {
             session.removeControl(control)
         }
@@ -81,7 +97,12 @@ enum CaptureControlsInstaller {
                 session.addControl(zoom)
                 installed.zoom = zoom
                 installed.zoomValues = zoomValues
+                Log.controls.info("controls: zoom added values=\(zoomValues.count, privacy: .public) range=\(zoomValues.first ?? 0, privacy: .public)...\(zoomValues.last ?? 0, privacy: .public) value=\(zoom.value, privacy: .public)")
+            } else {
+                Log.controls.error("controls: cannot add zoom slider")
             }
+        } else {
+            Log.controls.info("controls: zoom skipped, only \(zoomValues.count, privacy: .public) values")
         }
 
         // Exposure compensation in third stops.
@@ -91,14 +112,20 @@ enum CaptureControlsInstaller {
             let bias = AVCaptureSlider("Exposure", symbolName: "plusminus.circle", in: lower...upper, step: 1.0 / 3.0)
             bias.localizedValueFormat = "%@ EV"
             bias.prominentValues = [0]
-            bias.value = min(max(config.bias, lower), upper)
+            // Must be on the slider's 1/3-stop grid and in range, or AVFoundation raises.
+            bias.value = min(max((config.bias * 3).rounded() / 3, lower), upper)
             let onBias = config.onBias
             bias.setActionQueue(delegateQueue) { value in onBias(value) }
             if session.canAddControl(bias) {
                 session.addControl(bias)
                 installed.bias = bias
                 installed.biasBounds = lower...upper
+                Log.controls.info("controls: exposure added range=\(lower, privacy: .public)...\(upper, privacy: .public) value=\(bias.value, privacy: .public)")
+            } else {
+                Log.controls.error("controls: cannot add exposure slider")
             }
+        } else {
+            Log.controls.info("controls: exposure skipped, empty range \(lower, privacy: .public)...\(upper, privacy: .public)")
         }
 
         if !config.lookCodes.isEmpty {
@@ -106,10 +133,16 @@ enum CaptureControlsInstaller {
                                             localizedIndexTitles: config.lookCodes)
             look.selectedIndex = CameraMath.clamp(config.selectedIndex, 0, config.lookCodes.count - 1)
             let onSelect = config.onSelect
-            look.setActionQueue(delegateQueue) { index in onSelect(index) }
+            look.setActionQueue(delegateQueue) { index in
+                Log.controls.debug("controls: look action \(index, privacy: .public)")
+                onSelect(index)
+            }
             if session.canAddControl(look) {
                 session.addControl(look)
                 installed.look = look
+                Log.controls.info("controls: look added count=\(config.lookCodes.count, privacy: .public) sel=\(look.selectedIndex, privacy: .public)")
+            } else {
+                Log.controls.error("controls: cannot add look picker")
             }
         }
 
@@ -118,10 +151,16 @@ enum CaptureControlsInstaller {
                                              localizedIndexTitles: config.ratioTitles)
             ratio.selectedIndex = CameraMath.clamp(config.ratioIndex, 0, config.ratioTitles.count - 1)
             let onRatio = config.onRatio
-            ratio.setActionQueue(delegateQueue) { index in onRatio(index) }
+            ratio.setActionQueue(delegateQueue) { index in
+                Log.controls.debug("controls: ratio action \(index, privacy: .public)")
+                onRatio(index)
+            }
             if session.canAddControl(ratio) {
                 session.addControl(ratio)
                 installed.ratio = ratio
+                Log.controls.info("controls: ratio added count=\(config.ratioTitles.count, privacy: .public) sel=\(ratio.selectedIndex, privacy: .public)")
+            } else {
+                Log.controls.error("controls: cannot add ratio picker")
             }
         }
         return installed

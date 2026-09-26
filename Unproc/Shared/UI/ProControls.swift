@@ -41,15 +41,13 @@ struct ProControls: View {
                         .glassEffect(.regular, in: .rect(cornerRadius: 16))
                         .transition(Theme.popover(anchor: .bottom, offsetY: 6, reduceMotion: reduceMotion))
                 }
-                // Fill the width when the chips fit; scroll horizontally when
-                // they don't (six chips on an SE-size screen).
-                ViewThatFits(in: .horizontal) {
+                // Always a real horizontal scroller: chips keep their natural
+                // width and the row drags when they don't all fit.
+                ScrollView(.horizontal, showsIndicators: false) {
                     chipRow
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        chipRow
-                    }
-                    .scrollClipDisabled()
+                        .padding(.horizontal, 2)
                 }
+                .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
             }
         }
         .animation(Theme.snappy, value: expanded)
@@ -93,7 +91,7 @@ struct ProControls: View {
                     // values change constantly and would just be noise.
                     .animation(manual ? Theme.snappy : nil, value: valueText(parameter))
             }
-            .frame(minWidth: 48, maxWidth: .infinity)
+            .frame(minWidth: 56)
             .padding(.vertical, 7)
             .padding(.horizontal, 4)
             .contentShape(Capsule())

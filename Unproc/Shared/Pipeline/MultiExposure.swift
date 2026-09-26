@@ -1,6 +1,7 @@
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import Foundation
+import os
 
 /// Film-style in-camera double exposure: two exposures summed on the same
 /// "frame" in linear light, each pulled down so the sum stays printable,
@@ -13,7 +14,11 @@ enum MultiExposure {
     /// The result has `first`'s extent; `second` is scaled to fill it.
     static func blend(_ first: CIImage, _ second: CIImage) -> CIImage {
         let target = first.extent
-        guard !target.isInfinite, !target.isEmpty else { return first }
+        Log.pipeline.info("multi: blend first=\(String(describing: target), privacy: .public) second=\(String(describing: second.extent), privacy: .public)")
+        guard !target.isInfinite, !target.isEmpty else {
+            Log.pipeline.error("multi: first extent invalid, returning first unblended")
+            return first
+        }
         let other = fill(second, to: target)
 
         // Additive exposure: 0.6·a + 0.6·b == 1.2 · mix(a, b, 0.5).
@@ -23,7 +28,10 @@ enum MultiExposure {
         dissolve.inputImage = first
         dissolve.targetImage = other
         dissolve.time = 0.5
-        guard let averaged = dissolve.outputImage else { return first }
+        guard let averaged = dissolve.outputImage else {
+            Log.pipeline.error("multi: dissolve produced no image, returning first")
+            return first
+        }
 
         let g = 2 * exposureGain
         let gain = CIFilter.colorMatrix()
@@ -33,7 +41,10 @@ enum MultiExposure {
         gain.bVector = CIVector(x: 0, y: 0, z: g, w: 0)
         gain.aVector = CIVector(x: 0, y: 0, z: 0, w: 1)
         gain.biasVector = CIVector(x: 0, y: 0, z: 0, w: 0)
-        guard let summed = gain.outputImage else { return first }
+        guard let summed = gain.outputImage else {
+            Log.pipeline.error("multi: gain produced no image, returning first")
+            return first
+        }
 
         return softClip(summed).cropped(to: target)
     }

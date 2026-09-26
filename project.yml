@@ -85,6 +85,19 @@ targets:
         APPLICATION_EXTENSION_API_ONLY: YES
         SKIP_INSTALL: YES
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) UNPROC_WIDGETS
+  UnprocTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: UnprocTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: lol.peril.unproc.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Unproc.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Unproc
+        BUNDLE_LOADER: $(TEST_HOST)
+    dependencies:
+      - target: Unproc
   UnprocUITests:
     type: bundle.ui-testing
     platform: iOS
@@ -106,6 +119,7 @@ schemes:
         UnprocWidgets: all
     test:
       targets:
+        - UnprocTests
         - UnprocUITests
     run:
       config: Debug

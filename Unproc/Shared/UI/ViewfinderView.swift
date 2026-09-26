@@ -3,6 +3,7 @@ import UIKit
 import MetalKit
 import CoreImage
 import QuartzCore
+import os
 
 /// Live preview. An `MTKView` that draws the newest `PreviewFrameBus` frame
 /// through gain → Look → zebras → peaking with `Developer.shared.context`.
@@ -46,6 +47,7 @@ struct ViewfinderView: UIViewRepresentable {
         if let layer = view.layer as? CAMetalLayer {
             layer.colorspace = CGColorSpace(name: CGColorSpace.displayP3)
         }
+        Log.ui.info("viewfinder: make view metal=\(coordinator.device != nil, privacy: .public)")
         coordinator.view = view
         coordinator.installGestures(on: view)
         apply(to: coordinator)
@@ -68,6 +70,7 @@ struct ViewfinderView: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ uiView: MTKView, coordinator: Coordinator) {
+        Log.ui.info("viewfinder: dismantle")
         coordinator.bus?.setHandler(nil)
         coordinator.view = nil
         uiView.delegate = nil
@@ -137,11 +140,21 @@ struct ViewfinderView: UIViewRepresentable {
         var onLongPress: ((CGPoint) -> Void)?
         var onSwipe: ((Int) -> Void)?
 
+        // Logging state (first frame / size changes only, never per frame).
+        private var renderedFrames = 0
+        private var lastFrameExtent: CGRect = .null
+        private var loggedRenderSkip = false
+
         override init() {
             let device = MTLCreateSystemDefaultDevice()
             self.device = device
             self.queue = device?.makeCommandQueue()
             super.init()
+            if device == nil {
+                Log.ui.error("viewfinder: no Metal device; preview cannot render")
+            } else if queue == nil {
+                Log.ui.error("viewfinder: could not create Metal command queue")
+            }
         }
 
         // MARK: Drawing
@@ -154,7 +167,9 @@ struct ViewfinderView: UIViewRepresentable {
             view.draw()   // → draw(in:)
         }
 
-        nonisolated func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+        nonisolated func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+            Log.ui.info("viewfinder: drawable size -> \(String(describing: size), privacy: .public)")
+        }
 
         nonisolated func draw(in view: MTKView) {
             MainActor.assumeIsolated {
@@ -167,12 +182,33 @@ struct ViewfinderView: UIViewRepresentable {
             guard let frame = slot.take() else { return }
             guard let queue,
                   let drawable = view.currentDrawable,
-                  let commandBuffer = queue.makeCommandBuffer() else { return }
+                  let commandBuffer = queue.makeCommandBuffer() else {
+                if !loggedRenderSkip {
+                    loggedRenderSkip = true
+                    Log.ui.debug("viewfinder: render skipped (no queue/drawable/command buffer); logged once")
+                }
+                return
+            }
 
             let size = view.drawableSize
             guard size.width > 0, size.height > 0, !frame.extent.isInfinite,
-                  frame.extent.width > 0, frame.extent.height > 0 else { return }
+                  frame.extent.width > 0, frame.extent.height > 0 else {
+                if !loggedRenderSkip {
+                    loggedRenderSkip = true
+                    Log.ui.debug("viewfinder: render skipped size=\(String(describing: size), privacy: .public) frame=\(String(describing: frame.extent), privacy: .public); logged once")
+                }
+                return
+            }
             let bounds = CGRect(origin: .zero, size: size)
+            if frame.extent != lastFrameExtent {
+                let previous = lastFrameExtent
+                lastFrameExtent = frame.extent
+                Log.ui.debug("viewfinder: frame extent \(String(describing: previous), privacy: .public) -> \(String(describing: frame.extent), privacy: .public) drawable=\(String(describing: size), privacy: .public)")
+            }
+            if renderedFrames == 0 {
+                Log.ui.notice("viewfinder: first frame extent=\(String(describing: frame.extent), privacy: .public) drawable=\(String(describing: size), privacy: .public)")
+            }
+            renderedFrames &+= 1
 
             var image = frame
             let gainEV = bus?.previewGainEV ?? 0
@@ -260,21 +296,28 @@ struct ViewfinderView: UIViewRepresentable {
 
         @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
             guard recognizer.state == .ended, let view = recognizer.view else { return }
-            onTap?(normalized(recognizer.location(in: view), in: view))
+            let point = normalized(recognizer.location(in: view), in: view)
+            Log.ui.debug("viewfinder: tap \(String(describing: point), privacy: .public)")
+            onTap?(point)
         }
 
         @objc private func handleDoubleTap(_ recognizer: UITapGestureRecognizer) {
             guard recognizer.state == .ended, let view = recognizer.view else { return }
-            onDoubleTap?(normalized(recognizer.location(in: view), in: view))
+            let point = normalized(recognizer.location(in: view), in: view)
+            Log.ui.debug("viewfinder: double tap \(String(describing: point), privacy: .public)")
+            onDoubleTap?(point)
         }
 
         @objc private func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
             guard recognizer.state == .began, let view = recognizer.view else { return }
-            onLongPress?(normalized(recognizer.location(in: view), in: view))
+            let point = normalized(recognizer.location(in: view), in: view)
+            Log.ui.debug("viewfinder: long press \(String(describing: point), privacy: .public)")
+            onLongPress?(point)
         }
 
         @objc private func handleSwipe(_ recognizer: UISwipeGestureRecognizer) {
             guard recognizer.state == .ended else { return }
+            Log.ui.debug("viewfinder: swipe \(recognizer.direction == .left ? "left" : "right", privacy: .public)")
             onSwipe?(recognizer.direction == .left ? 1 : -1)
         }
     }

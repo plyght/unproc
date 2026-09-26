@@ -76,7 +76,7 @@ jobs:
           if-no-files-found: error
 
   screenshots:
-    name: Simulator screenshots
+    name: Simulator tests + screenshots
     runs-on: macos-26
     timeout-minutes: 60
     permissions:
@@ -92,6 +92,15 @@ jobs:
 
       - name: Install XcodeGen
         run: brew install xcodegen
+
+      - name: Fetch demo DNG (simulator builds only)
+        # A real iPhone DNG (raw.pixls.us, CC0) so the simulator exercises RAW
+        # development and the RAW+JPEG Photos save. Never in release IPAs.
+        run: |
+          curl -fsSL --retry 3 -o Unproc/App/DemoRAW.dng \
+            "https://raw.pixls.us/data/Apple/iPhone%20XS/IMG_1105.dng" \
+            && ls -la Unproc/App/DemoRAW.dng \
+            || echo "::warning::demo DNG unavailable; RAW path runs without it"
 
       - name: Generate project
         run: xcodegen generate
@@ -128,7 +137,7 @@ jobs:
           xcrun simctl privacy "$UDID" grant photos lol.peril.unproc || true
           xcrun simctl privacy "$UDID" grant camera lol.peril.unproc || true
 
-      - name: Run screenshot tour
+      - name: Unit tests, UI tests + screenshot tour
         run: |
           set -o pipefail
           xcodebuild test \
@@ -138,16 +147,27 @@ jobs:
             -derivedDataPath build \
             -resultBundlePath shots.xcresult \
             CODE_SIGNING_ALLOWED=NO \
-            | xcbeautify || echo "::warning::UI tour reported failures; exporting whatever was captured"
+            | xcbeautify
+
+      - name: Test summary
+        if: always()
+        run: |
+          xcrun xcresulttool get test-results summary --path shots.xcresult --compact 2>/dev/null \
+            | python3 -c 'import json,sys
+          d=json.load(sys.stdin)
+          print("result:", d.get("result"), "passed:", d.get("passedTests"), "failed:", d.get("failedTests"), "skipped:", d.get("skippedTests"))
+          for f in d.get("testFailures", []):
+              print("FAIL", f.get("testIdentifierString"), "-", f.get("failureText"))' || true
 
       - name: App log
         if: always()
         run: |
           xcrun simctl spawn "${{ steps.sim.outputs.udid }}" log show --last 30m --style compact \
             --predicate 'subsystem BEGINSWITH "lol.peril.unproc" OR (process == "Unproc" AND messageType >= error)' \
-            | tail -200 || true
+            | tail -800 || true
 
       - name: Export screenshots
+        if: always()
         run: |
           mkdir -p raw screenshots
           xcrun xcresulttool export attachments --path shots.xcresult --output-path raw
@@ -157,7 +177,7 @@ jobs:
           for test in manifest:
               for a in test.get("attachments", []):
                   name = a.get("suggestedHumanReadableName") or a["exportedFileName"]
-                  if not name[:2].isdigit():
+                  if not (name[:2].isdigit() or (name[:1] == "P" and name[1:2].isdigit())):
                       continue  # only our named screenshots, not debug attachments
                   base = name.split("_")[0]
                   ext = os.path.splitext(a["exportedFileName"])[1] or ".png"
@@ -168,13 +188,14 @@ jobs:
           ls -la screenshots
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: screenshots
           path: screenshots
           if-no-files-found: warn
 
       - name: Publish to ci-screenshots branch
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/master'
         run: |
           set -e
           SHA="${GITHUB_SHA::7}"

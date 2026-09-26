@@ -2,6 +2,7 @@ import Foundation
 import ImageIO
 import Observation
 import UIKit
+import os
 
 /// Photos captured in this lock-screen session: `<yyyyMMdd-HHmmss-SSS>.jpg`
 /// (+ optional `.dng`) files in the session content directory. Newest first.
@@ -16,7 +17,11 @@ final class SessionPhotoStore: PhotoStore {
 
     init(root: URL) {
         self.root = root
-        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        } catch {
+            Log.viewer.error("session store: create folder failed \(root.path, privacy: .public): \(Log.describe(error), privacy: .public)")
+        }
 
         let fd = open(root.path, O_EVTONLY)
         if fd >= 0 {
@@ -26,12 +31,16 @@ final class SessionPhotoStore: PhotoStore {
             source.setCancelHandler { close(fd) }
             watcher = source
         } else {
+            let err = errno
+            Log.viewer.error("session store: cannot watch folder \(root.path, privacy: .public) errno=\(err, privacy: .public)")
             watcher = nil
         }
 
         items = Self.scan(root)
+        Log.viewer.info("session store: init root=\(root.path, privacy: .public) items=\(self.items.count, privacy: .public) watching=\(self.watcher != nil, privacy: .public)")
 
         watcher?.setEventHandler { [weak self] in
+            Log.viewer.debug("session store: folder event")
             guard let self else { return }
             Task { @MainActor in self.scheduleReload() }
         }
@@ -46,46 +55,73 @@ final class SessionPhotoStore: PhotoStore {
 
     func reload() async {
         let found = Self.scan(root)
-        if found != items { items = found }
+        let changed = found != items
+        if changed { items = found }
+        Log.viewer.info("session store: reload count=\(found.count, privacy: .public) changed=\(changed, privacy: .public)")
     }
 
     /// `side` is in points.
     func thumbnail(for item: PhotoItem, side: CGFloat) async -> UIImage? {
-        guard case .file(let url) = item.source else { return nil }
+        guard case .file(let url) = item.source else {
+            Log.viewer.error("session store: thumbnail for non-file item \(item.id, privacy: .public)")
+            return nil
+        }
         let pixels = Int((max(side, 1) * 3).rounded(.up))
-        return await Task.detached(priority: .userInitiated) {
+        let image = await Task.detached(priority: .userInitiated) {
             Self.downsample(url, maxPixel: pixels)
         }.value
+        if image == nil {
+            Log.viewer.error("session store: thumbnail decode failed \(url.lastPathComponent, privacy: .public)")
+        }
+        return image
     }
 
     func fullImage(for item: PhotoItem) async -> UIImage? {
-        guard case .file(let url) = item.source else { return nil }
+        guard case .file(let url) = item.source else {
+            Log.viewer.error("session store: full image for non-file item \(item.id, privacy: .public)")
+            return nil
+        }
         // Decoded off the main thread and capped so a 48 MP frame doesn't
         // cost ~200 MB of memory in the extension.
-        return await Task.detached(priority: .userInitiated) {
+        let image = await Task.detached(priority: .userInitiated) {
             Self.downsample(url, maxPixel: 4096)
         }.value
+        if image == nil {
+            Log.viewer.error("session store: full image decode failed \(url.lastPathComponent, privacy: .public)")
+        }
+        return image
     }
 
     func delete(_ items: [PhotoItem]) async throws {
         let fm = FileManager.default
         var firstError: Error?
         var removed = Set<String>()
+        Log.viewer.notice("session store: deleting \(items.count, privacy: .public) items")
         for item in items {
             guard case .file(let url) = item.source else { continue }
             do {
                 if fm.fileExists(atPath: url.path) { try fm.removeItem(at: url) }
                 removed.insert(item.id)
             } catch {
+                Log.viewer.error("session store: delete failed \(url.lastPathComponent, privacy: .public): \(Log.describe(error), privacy: .public)")
                 if firstError == nil { firstError = error }
             }
             let base = url.deletingPathExtension()
             for ext in ["dng", "DNG"] {
                 let sibling = base.appendingPathExtension(ext)
-                if fm.fileExists(atPath: sibling.path) { try? fm.removeItem(at: sibling) }
+                if fm.fileExists(atPath: sibling.path) {
+                    do {
+                        try fm.removeItem(at: sibling)
+                    } catch {
+                        Log.viewer.error("session store: delete sibling failed \(sibling.lastPathComponent, privacy: .public): \(Log.describe(error), privacy: .public)")
+                    }
+                }
             }
         }
         self.items.removeAll { removed.contains($0.id) }
+        let removedCount = removed.count
+        let errorText = firstError.map(Log.describe) ?? "none"
+        Log.viewer.notice("session store: deleted \(removedCount, privacy: .public)/\(items.count, privacy: .public) error=\(errorText, privacy: .public)")
         if let firstError { throw firstError }
     }
 
@@ -102,9 +138,15 @@ final class SessionPhotoStore: PhotoStore {
 
     private static func scan(_ root: URL) -> [PhotoItem] {
         let fm = FileManager.default
-        let urls = (try? fm.contentsOfDirectory(at: root,
-                                                includingPropertiesForKeys: [.creationDateKey],
-                                                options: [.skipsHiddenFiles])) ?? []
+        let urls: [URL]
+        do {
+            urls = try fm.contentsOfDirectory(at: root,
+                                              includingPropertiesForKeys: [.creationDateKey],
+                                              options: [.skipsHiddenFiles])
+        } catch {
+            Log.viewer.error("session store: scan failed \(root.path, privacy: .public): \(Log.describe(error), privacy: .public)")
+            urls = []
+        }
         let photos: [PhotoItem] = urls.compactMap { url in
             guard url.pathExtension.lowercased() == "jpg" || url.pathExtension.lowercased() == "jpeg" else { return nil }
             let name = url.deletingPathExtension().lastPathComponent
@@ -132,7 +174,10 @@ final class SessionPhotoStore: PhotoStore {
     }
 
     nonisolated private static func downsample(_ url: URL, maxPixel: Int) -> UIImage? {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            Log.viewer.error("session store: CGImageSource failed for \(url.lastPathComponent, privacy: .public)")
+            return nil
+        }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,

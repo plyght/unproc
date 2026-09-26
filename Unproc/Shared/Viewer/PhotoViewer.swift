@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import os
 
 /// Full-screen viewer: paged photos, film strip, delete with unlimited
 /// undo/redo (and shake to undo). Deletions are only applied when the viewer
@@ -261,6 +262,7 @@ struct PhotoViewer: View {
         let item = items[i]
         guard leaving?.id != item.id else { return }   // already on its way out
         if let inFlight = leaving { commitHide(inFlight) }
+        Log.viewer.info("viewer: hide \(item.id, privacy: .public) (pending before=\(history.pendingCount, privacy: .public))")
         deleteTick += 1
         playExit(of: item, viaRedo: false)
     }
@@ -306,6 +308,7 @@ struct PhotoViewer: View {
             return
         }
         guard history.canUndo else { return }
+        Log.viewer.info("viewer: undo (pending=\(history.pendingCount, privacy: .public))")
         motionToken += 1
         let token = motionToken
         var restoredID: PhotoItem.ID?
@@ -327,6 +330,7 @@ struct PhotoViewer: View {
     private func redo() {
         guard !isDeleting, leaving == nil, let target = history.nextRedo else { return }
         if arrivingID == target.id { arrivingID = nil }
+        Log.viewer.info("viewer: redo \(target.id, privacy: .public)")
         redoTick += 1
         if target.id == currentID {
             playExit(of: target, viaRedo: true)
@@ -343,6 +347,7 @@ struct PhotoViewer: View {
     private func requestClose() {
         guard !isDeleting else { return }
         if let inFlight = leaving { commitHide(inFlight) }
+        Log.viewer.info("viewer: close requested pending=\(history.pendingCount, privacy: .public)")
         if history.isEmpty {
             finish()
         } else {
@@ -352,6 +357,7 @@ struct PhotoViewer: View {
     }
 
     private func keepAllAndClose() {
+        Log.viewer.info("viewer: keep all (\(history.pendingCount, privacy: .public) restored)")
         history.reset()
         finish()
     }
@@ -359,10 +365,13 @@ struct PhotoViewer: View {
     private func commitDeletions() {
         let doomed = history.pendingItems(orderedLike: store.items)
         isDeleting = true
+        Log.viewer.notice("viewer: committing deletion of \(doomed.count, privacy: .public) items")
         Task {
             do {
                 try await store.delete(doomed)
+                Log.viewer.notice("viewer: deleted \(doomed.count, privacy: .public) items")
             } catch {
+                Log.viewer.error("viewer: delete of \(doomed.count, privacy: .public) items failed/declined: \(Log.describe(error), privacy: .public)")
                 // Declined (Photos shows its own prompt) or failed: nothing we
                 // hid is gone, so simply show everything again.
             }
@@ -445,6 +454,8 @@ private struct PhotoPage: View {
         if let full = await store.fullImage(for: item) {
             ViewerImageCache.setFull(full, for: item.id)
             image = full
+        } else if !Task.isCancelled {
+            Log.viewer.error("viewer: full image unavailable for \(item.id, privacy: .public) (showing thumb=\(image != nil, privacy: .public))")
         }
     }
 }

@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import CoreImage
 import Synchronization
+import os
 
 /// The app's single accent colour: the phone's own enclosure colour when it
 /// can be read (AUTO), otherwise unproc's signal orange.
@@ -41,13 +42,20 @@ enum DeviceAccent {
     @discardableResult
     static func refresh() -> SIMD4<Float> {
         let value: SIMD4<Float>
-        switch SettingsStore.shared.value.accent {
+        let mode = SettingsStore.shared.value.accent
+        switch mode {
         case .orange:
             value = signalOrange
         case .auto:
-            value = enclosureColor().map(legible) ?? signalOrange
+            let enclosure = enclosureColor()
+            if enclosure == nil {
+                Log.settings.notice("accent: enclosure colour unavailable, falling back to signal orange")
+            }
+            value = enclosure.map(legible) ?? signalOrange
         }
         storage.withLock { $0 = value }
+        let hex = hexString(value)
+        Log.settings.notice("accent: mode=\(mode.rawValue, privacy: .public) resolved rgb=\(value.x, privacy: .public),\(value.y, privacy: .public),\(value.z, privacy: .public) hex=\(hex, privacy: .public)")
         return value
     }
 
@@ -58,12 +66,26 @@ enum DeviceAccent {
         let device = UIDevice.current
         for name in ["deviceInfoForKey:", "_deviceInfoForKey:"] {
             let selector = NSSelectorFromString(name)
-            guard device.responds(to: selector),
-                  let raw = device.perform(selector, with: "DeviceEnclosureColor")?.takeUnretainedValue()
-            else { continue }
+            guard device.responds(to: selector) else {
+                Log.settings.notice("accent: UIDevice does not respond to \(name, privacy: .public)")
+                continue
+            }
+            guard let raw = device.perform(selector, with: "DeviceEnclosureColor")?.takeUnretainedValue() else {
+                Log.settings.notice("accent: \(name, privacy: .public) DeviceEnclosureColor returned nil")
+                continue
+            }
+            let rawText = String(describing: raw)
+            let rawType = String(describing: type(of: raw))
+            Log.settings.notice("accent: \(name, privacy: .public) DeviceEnclosureColor raw=\(rawText, privacy: .public) type=\(rawType, privacy: .public)")
             if let string = raw as? String, let rgb = parseHex(string) { return rgb }
+            Log.settings.notice("accent: DeviceEnclosureColor value not a parseable hex colour")
         }
         return nil
+    }
+
+    private static func hexString(_ c: SIMD4<Float>) -> String {
+        func byte(_ v: Float) -> Int { Int((min(max(v, 0), 1) * 255).rounded()) }
+        return String(format: "#%02X%02X%02X", byte(c.x), byte(c.y), byte(c.z))
     }
 
     /// "#e1e4e3" / "e1e4e3" → RGBA. Numeric (index) values aren't mappable, so they fall back.

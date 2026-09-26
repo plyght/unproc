@@ -1,5 +1,13 @@
 import Foundation
 import Observation
+import os
+
+// The widget target compiles this file without Log.swift.
+#if UNPROC_WIDGETS
+private let settingsLog = Logger(subsystem: "lol.peril.unproc", category: "settings")
+#else
+private let settingsLog = Log.settings
+#endif
 
 /// What a single press of the shutter writes out.
 enum OutputFormat: String, Codable, CaseIterable, Sendable {
@@ -67,18 +75,37 @@ struct CaptureSettings: Codable, Equatable, Sendable {
     // Tolerant decoding: settings saved by an older build (or pushed through
     // the capture intent) may lack newer keys; those fall back to defaults.
     init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let c: KeyedDecodingContainer<CodingKeys>
+        do {
+            c = try decoder.container(keyedBy: CodingKeys.self)
+        } catch {
+            settingsLog.error("settings: decode container failed: \(error.localizedDescription, privacy: .public)")
+            throw error
+        }
         let d = CaptureSettings()
-        output = (try? c.decodeIfPresent(OutputFormat.self, forKey: .output)) ?? d.output
-        rawFlavor = (try? c.decodeIfPresent(RawFlavor.self, forKey: .rawFlavor)) ?? d.rawFlavor
-        lookID = (try? c.decodeIfPresent(String.self, forKey: .lookID)) ?? d.lookID
-        doubleExposure = (try? c.decodeIfPresent(Bool.self, forKey: .doubleExposure)) ?? d.doubleExposure
-        proMode = (try? c.decodeIfPresent(Bool.self, forKey: .proMode)) ?? d.proMode
-        zebras = (try? c.decodeIfPresent(Bool.self, forKey: .zebras)) ?? d.zebras
-        peaking = (try? c.decodeIfPresent(Bool.self, forKey: .peaking)) ?? d.peaking
-        lensID = (try? c.decodeIfPresent(String.self, forKey: .lensID)) ?? d.lensID
-        ratio = (try? c.decodeIfPresent(FrameRatio.self, forKey: .ratio)) ?? d.ratio
-        accent = (try? c.decodeIfPresent(AccentMode.self, forKey: .accent)) ?? d.accent
+        output = Self.field(c, .output, d.output)
+        rawFlavor = Self.field(c, .rawFlavor, d.rawFlavor)
+        lookID = Self.field(c, .lookID, d.lookID)
+        doubleExposure = Self.field(c, .doubleExposure, d.doubleExposure)
+        proMode = Self.field(c, .proMode, d.proMode)
+        zebras = Self.field(c, .zebras, d.zebras)
+        peaking = Self.field(c, .peaking, d.peaking)
+        lensID = Self.field(c, .lensID, d.lensID)
+        ratio = Self.field(c, .ratio, d.ratio)
+        accent = Self.field(c, .accent, d.accent)
+    }
+
+    /// `decodeIfPresent` with a fallback; failures are logged, never thrown.
+    private static func field<T: Decodable>(_ c: KeyedDecodingContainer<CodingKeys>,
+                                            _ key: CodingKeys, _ fallback: T) -> T {
+        do {
+            if let value = try c.decodeIfPresent(T.self, forKey: key) { return value }
+            settingsLog.debug("settings: key \(key.stringValue, privacy: .public) missing, using default")
+            return fallback
+        } catch {
+            settingsLog.error("settings: key \(key.stringValue, privacy: .public) failed to decode, using default: \(error.localizedDescription, privacy: .public)")
+            return fallback
+        }
     }
 }
 
@@ -106,17 +133,34 @@ final class SettingsStore {
     private static let key = "unproc.settings.v1"
 
     private init() {
-        if let data = UserDefaults.standard.data(forKey: Self.key),
-           let decoded = try? JSONDecoder().decode(CaptureSettings.self, from: data) {
+        let data = UserDefaults.standard.data(forKey: Self.key)
+        var decoded: CaptureSettings?
+        if let data {
+            do {
+                decoded = try JSONDecoder().decode(CaptureSettings.self, from: data)
+            } catch {
+                settingsLog.error("settings: stored settings (\(data.count, privacy: .public)B) failed to decode, using defaults: \(error.localizedDescription, privacy: .public)")
+            }
+        } else {
+            settingsLog.info("settings: nothing stored, using defaults")
+        }
+        if let decoded {
             value = decoded
         } else {
             value = CaptureSettings()
         }
+        let loaded = String(describing: value)
+        settingsLog.info("settings: loaded \(loaded, privacy: .public)")
     }
 
     private func persist() {
-        if let data = try? JSONEncoder().encode(value) {
+        do {
+            let data = try JSONEncoder().encode(value)
             UserDefaults.standard.set(data, forKey: Self.key)
+            let saved = String(describing: value)
+            settingsLog.debug("settings: persisted \(data.count, privacy: .public)B \(saved, privacy: .public)")
+        } catch {
+            settingsLog.error("settings: encode failed, not persisted: \(error.localizedDescription, privacy: .public)")
         }
     }
 }

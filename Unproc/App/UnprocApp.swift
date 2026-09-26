@@ -1,6 +1,7 @@
 import LockedCameraCapture
 import SwiftUI
 import UIKit
+import os
 
 @main
 struct UnprocApp: App {
@@ -17,12 +18,25 @@ struct UnprocApp: App {
         FileManager.default.temporaryDirectory.appendingPathComponent("unproc-demo", isDirectory: true)
     }
 
+    /// Demo mode normally avoids Photos; `-UNPROC_PHOTOS` forces the real
+    /// library path (used by the CI test that exercises saving to Photos).
+    private static var useLocalStore: Bool {
+        CameraController.isDemo && !ProcessInfo.processInfo.arguments.contains("-UNPROC_PHOTOS")
+    }
+
     private static func makeStore() -> any PhotoStore {
-        CameraController.isDemo ? SessionPhotoStore(root: demoRoot) : LibraryPhotoStore()
+        let local = useLocalStore
+        let target = local ? "session(local folder)" : "photo library"
+        let demo = CameraController.isDemo
+        Log.app.info("app: store=\(target, privacy: .public) demo=\(demo, privacy: .public)")
+        return local ? SessionPhotoStore(root: demoRoot) : LibraryPhotoStore()
     }
 
     private static func makeSink() -> any CaptureSink {
-        CameraController.isDemo ? SessionContentSink(root: demoRoot) : PhotoLibrarySink()
+        let local = useLocalStore
+        let target = local ? "session(local folder) " + demoRoot.path : "photo library"
+        Log.app.info("app: sink=\(target, privacy: .public)")
+        return local ? SessionContentSink(root: demoRoot) : PhotoLibrarySink()
     }
 
     var body: some Scene {
@@ -44,10 +58,12 @@ struct UnprocApp: App {
             .task { launch() }
             // Opened from the lock-screen capture extension after unlocking.
             .onContinueUserActivity(NSUserActivityTypeLockedCameraCapture) { _ in
+                Log.lockscreen.notice("app: continued locked-camera-capture activity")
                 LockedCaptureImporter.importPending()
             }
         }
-        .onChange(of: scenePhase) { _, phase in
+        .onChange(of: scenePhase) { old, phase in
+            Log.app.notice("app: scenePhase \(String(describing: old), privacy: .public) -> \(String(describing: phase), privacy: .public)")
             if phase == .active {
                 LockedCaptureImporter.importPending()
             }
@@ -56,6 +72,14 @@ struct UnprocApp: App {
 
     @MainActor
     private func launch() {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        let args = ProcessInfo.processInfo.arguments.dropFirst().joined(separator: " ")
+        let system = UIDevice.current.systemVersion
+        let model = UIDevice.current.model
+        let demo = CameraController.isDemo
+        Log.app.notice("app: launch v\(version, privacy: .public) (\(build, privacy: .public)) iOS \(system, privacy: .public) model=\(model, privacy: .public) demo=\(demo, privacy: .public) args=[\(args, privacy: .public)]")
         // Keep the lock-screen extension's settings in step with the app's.
         let settings = SettingsStore.shared
         settings.onChange = { CaptureSettingsSync.push($0) }

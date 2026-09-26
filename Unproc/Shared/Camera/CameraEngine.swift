@@ -2,6 +2,7 @@ import AVFoundation
 import CoreImage
 import Foundation
 import ImageIO
+import os
 
 // MARK: - Values exchanged between the engine and CameraController
 
@@ -149,7 +150,14 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     // MARK: - Lifecycle
 
     func discoverLenses() async -> [Lens] {
-        await onSessionQueue { () -> [Lens] in LensDiscovery.discover() }
+        await onSessionQueue { () -> [Lens] in
+            let clock = ContinuousClock()
+            let began = clock.now
+            let lenses = LensDiscovery.discover()
+            let ms = CameraLogText.ms(clock.now - began)
+            Log.camera.info("lenses: discovered count=\(lenses.count, privacy: .public) in \(ms, privacy: .public)ms")
+            return lenses
+        }
     }
 
     /// Configures (first time), selects `lens` if nothing is active yet, and
@@ -157,6 +165,9 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     /// stopped or interrupted one is restarted.
     func start(lens: Lens, flavor: RawFlavor, intent: CameraIntent) async -> CameraStartOutcome {
         await onSessionQueue { [self] () -> CameraStartOutcome in
+            let clock = ContinuousClock()
+            let began = clock.now
+            Log.camera.notice("session: start lens=\(lens.id, privacy: .public) flavor=\(flavor.rawValue, privacy: .public) configured=\(self.configured, privacy: .public) hasDevice=\(self.device != nil, privacy: .public) running=\(self.session.isRunning, privacy: .public)")
             wantsRunning = true
             if !configured {
                 configureOutputs()
@@ -166,29 +177,40 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
                 do {
                     try switchTo(lens)
                 } catch {
+                    Log.camera.error("session: start failed switching to \(lens.id, privacy: .public): \(Log.describe(error), privacy: .public)")
                     return .failed(error.localizedDescription)
                 }
                 applyIntent(intent)
             } else if flavor != rawFlavor {
+                Log.camera.info("session: start flavor change \(self.rawFlavor.rawValue, privacy: .public) -> \(flavor.rawValue, privacy: .public)")
                 rawFlavor = flavor
                 configurePhotoOutput()
             }
             if !session.isRunning {
+                Log.camera.info("session: startRunning")
                 session.startRunning()
+                Log.camera.info("session: startRunning returned running=\(self.session.isRunning, privacy: .public) interrupted=\(self.session.isInterrupted, privacy: .public)")
             }
             guard let active = self.lens, let device else {
+                Log.camera.error("session: start ended without active lens/device")
                 return .failed("Camera unavailable")
             }
+            let ms = CameraLogText.ms(clock.now - began)
+            Log.camera.notice("session: started lens=\(active.id, privacy: .public) running=\(self.session.isRunning, privacy: .public) in \(ms, privacy: .public)ms")
             return .started(lens: active, ranges: ranges(of: device), isRunning: session.isRunning)
         }
     }
 
     func stop() {
+        Log.camera.notice("session: stop requested")
         tracker.stop()
         sessionQueue.async { [self] in
             wantsRunning = false
             if session.isRunning {
                 session.stopRunning()
+                Log.camera.info("session: stopRunning returned running=\(self.session.isRunning, privacy: .public)")
+            } else {
+                Log.camera.debug("session: stop, already not running")
             }
         }
     }
@@ -197,20 +219,33 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
 
     func select(_ lens: Lens, intent: CameraIntent) async -> CameraSelectOutcome {
         await onSessionQueue { [self] () -> CameraSelectOutcome in
-            guard configured, device != nil else { return .notConfigured }
+            guard configured, device != nil else {
+                Log.camera.info("lens: select \(lens.id, privacy: .public) before configuration; deferred to start")
+                return .notConfigured
+            }
             let sameDevice = device?.uniqueID == lens.deviceID
+            let fromID = self.lens?.id ?? "nil"
+            let clock = ContinuousClock()
+            let began = clock.now
+            Log.camera.info("lens: switch \(fromID, privacy: .public) -> \(lens.id, privacy: .public) mode=\(sameDevice ? "crop" : "device", privacy: .public) crop=\(Double(lens.crop), privacy: .public)")
             do {
                 try switchTo(lens)
             } catch {
+                Log.camera.error("lens: switch \(fromID, privacy: .public) -> \(lens.id, privacy: .public) failed: \(Log.describe(error), privacy: .public)")
                 return .failed(error.localizedDescription)
             }
+            let ms = CameraLogText.ms(clock.now - began)
+            Log.camera.info("lens: switched to \(lens.id, privacy: .public) mode=\(sameDevice ? "crop" : "device", privacy: .public) in \(ms, privacy: .public)ms")
             if !sameDevice {
                 applyIntent(intent)
             } else {
                 // Only the crop changed: keep everything, but re-centre AF/AE on the new framing.
                 pointOfInterest(intent.point ?? ViewfinderGeometry.centre, focusMode: .continuousAutoFocus, meter: true)
             }
-            guard let active = self.lens, let device else { return .failed("Camera unavailable") }
+            guard let active = self.lens, let device else {
+                Log.camera.error("lens: switch ended without active lens/device")
+                return .failed("Camera unavailable")
+            }
             return .switched(lens: active, ranges: ranges(of: device))
         }
     }
@@ -218,6 +253,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     func setRawFlavor(_ flavor: RawFlavor) async {
         await onSessionQueue { [self] () -> Void in
             guard flavor != rawFlavor else { return }
+            Log.camera.info("session: raw flavor \(self.rawFlavor.rawValue, privacy: .public) -> \(flavor.rawValue, privacy: .public) configured=\(self.configured, privacy: .public)")
             rawFlavor = flavor
             if configured, device != nil {
                 configurePhotoOutput()
@@ -226,34 +262,51 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     }
 
     private func configureOutputs() {
+        Log.camera.info("session: configuring outputs")
         session.beginConfiguration()
         if session.canSetSessionPreset(.photo) {
             session.sessionPreset = .photo
+        } else {
+            Log.camera.error("session: cannot set .photo preset")
         }
         if session.canAddOutput(photoOutput) {
             session.addOutput(photoOutput)
+        } else {
+            Log.camera.error("session: cannot add photo output")
         }
         videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
         videoOutput.alwaysDiscardsLateVideoFrames = true
         videoOutput.setSampleBufferDelegate(self, queue: videoQueue)
         if session.canAddOutput(videoOutput) {
             session.addOutput(videoOutput)
+        } else {
+            Log.camera.error("session: cannot add video output")
         }
         session.commitConfiguration()
         configured = true
+        Log.camera.info("session: outputs configured preset=\(self.session.sessionPreset.rawValue, privacy: .public) outputs=\(self.session.outputs.count, privacy: .public) supportsControls=\(self.session.supportsControls, privacy: .public)")
     }
 
     /// Makes `lens` active. Same physical device → only the zoom changes (fast).
     private func switchTo(_ lens: Lens) throws {
         if let device, device.uniqueID == lens.deviceID, input != nil {
+            Log.camera.debug("lens: same-device crop \(lens.id, privacy: .public) crop=\(Double(lens.crop), privacy: .public)")
             setZoom(lens.crop, on: device)
             self.lens = lens
             return
         }
         guard let newDevice = AVCaptureDevice(uniqueID: lens.deviceID) else {
+            Log.camera.error("lens: no AVCaptureDevice for id=\(lens.deviceID, privacy: .public) (lens \(lens.id, privacy: .public))")
             throw UnprocError.cameraUnavailable
         }
-        let newInput = try AVCaptureDeviceInput(device: newDevice)
+        Log.camera.info("lens: device switch to \(newDevice.localizedName, privacy: .public) type=\(newDevice.deviceType.rawValue, privacy: .public) id=\(newDevice.uniqueID, privacy: .public)")
+        let newInput: AVCaptureDeviceInput
+        do {
+            newInput = try AVCaptureDeviceInput(device: newDevice)
+        } catch {
+            Log.camera.error("lens: AVCaptureDeviceInput failed for \(lens.id, privacy: .public): \(Log.describe(error), privacy: .public)")
+            throw error
+        }
         tracker.stop()
 
         session.beginConfiguration()
@@ -261,6 +314,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             session.removeInput(input)
         }
         guard session.canAddInput(newInput) else {
+            Log.camera.error("lens: session cannot add input for \(lens.id, privacy: .public); restoring previous input=\(self.input != nil, privacy: .public)")
             if let input, session.canAddInput(input) {
                 session.addInput(input)
             }
@@ -271,11 +325,19 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
 
         // Keep the device locked across commit so the session can't override the format.
         var lockedForFormat = false
-        if let format = CaptureFormatPicker.bestPhotoFormat(for: newDevice),
+        let bestFormat = CaptureFormatPicker.bestPhotoFormat(for: newDevice)
+        if bestFormat == nil {
+            Log.camera.error("format: no suitable 4:3 high-quality format on \(lens.id, privacy: .public) (\(newDevice.formats.count, privacy: .public) formats); using .photo preset")
+        }
+        if let format = bestFormat,
            (try? newDevice.lockForConfiguration()) != nil {
             newDevice.activeFormat = format
             lockedForFormat = true
+            Log.camera.info("format: chose \(CameraLogText.format(format), privacy: .public)")
         } else if session.canSetSessionPreset(.photo) {
+            if bestFormat != nil {
+                Log.camera.error("format: lockForConfiguration failed on \(lens.id, privacy: .public); using .photo preset")
+            }
             session.sessionPreset = .photo
         }
         configureConnections(isFront: newDevice.position == .front)
@@ -291,12 +353,15 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         frozenDuration = nil
         simulatingLongExposure = false
 
+        Log.camera.info("format: active \(CameraLogText.format(newDevice.activeFormat), privacy: .public) preset=\(self.session.sessionPreset.rawValue, privacy: .public)")
+
         configurePhotoOutput()
         // The chosen format didn't give us RAW: fall back to the photo preset.
         if photoOutput.availableRawPhotoPixelFormatTypes.isEmpty,
            newDevice.position == .back,
            session.sessionPreset != .photo,
            session.canSetSessionPreset(.photo) {
+            Log.camera.error("format: no RAW formats with chosen format on \(lens.id, privacy: .public); falling back to .photo preset")
             session.beginConfiguration()
             session.sessionPreset = .photo
             session.commitConfiguration()
@@ -310,6 +375,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         bind(newDevice)
         // Controls aren't device-bound: install once, keep them across lens switches.
         if controlsConfig != nil, session.controls.isEmpty {
+            Log.controls.info("controls: none installed after device switch; installing")
             installControls()
         }
     }
@@ -345,6 +411,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         if !wantProRAW,
            !photoOutput.availableRawPhotoPixelFormatTypes.contains(where: { AVCapturePhotoOutput.isBayerRAWPixelFormat($0) }),
            photoOutput.isAppleProRAWSupported {
+            Log.camera.notice("photo output: no Bayer RAW available; enabling ProRAW as fallback")
             session.beginConfiguration()
             photoOutput.isAppleProRAWEnabled = true
             session.commitConfiguration()
@@ -352,13 +419,27 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
 
         if let dims = CaptureFormatPicker.largestPhotoDimensions(of: device.activeFormat) {
             photoOutput.maxPhotoDimensions = dims
+        } else {
+            Log.camera.error("photo output: active format has no supportedMaxPhotoDimensions")
+        }
+        let rawTypes = photoOutput.availableRawPhotoPixelFormatTypes.map(CameraLogText.fourCC).joined(separator: ",")
+        let codecs = photoOutput.availablePhotoCodecTypes.map(\.rawValue).joined(separator: ",")
+        Log.camera.info("photo output: flavor=\(self.rawFlavor.rawValue, privacy: .public) proRAWSupported=\(self.photoOutput.isAppleProRAWSupported, privacy: .public) proRAWEnabled=\(self.photoOutput.isAppleProRAWEnabled, privacy: .public) raw=[\(rawTypes, privacy: .public)] codecs=[\(codecs, privacy: .public)] maxDims=\(CameraLogText.dims(self.photoOutput.maxPhotoDimensions), privacy: .public)")
+        if photoOutput.availableRawPhotoPixelFormatTypes.isEmpty {
+            Log.camera.notice("photo output: no RAW formats available on this device/format; captures will be processed")
         }
     }
 
     private func setZoom(_ crop: CGFloat, on device: AVCaptureDevice) {
         let upper = max(device.activeFormat.videoMaxZoomFactor, 1)
         let zoom = CameraMath.clamp(crop, max(device.minAvailableVideoZoomFactor, 1), upper)
-        guard (try? device.lockForConfiguration()) != nil else { return }
+        do {
+            try device.lockForConfiguration()
+        } catch {
+            Log.camera.error("zoom: lock failed: \(Log.describe(error), privacy: .public)")
+            return
+        }
+        Log.camera.debug("zoom: videoZoomFactor requested=\(Double(crop), privacy: .public) applied=\(Double(zoom), privacy: .public) max=\(Double(upper), privacy: .public)")
         device.videoZoomFactor = zoom
         device.unlockForConfiguration()
     }
@@ -371,6 +452,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         let maxShutter = max(format.maxExposureDuration.seconds, minShutter)
         let minBias = device.minExposureTargetBias
         let maxBias = max(device.maxExposureTargetBias, minBias)
+        Log.camera.debug("ranges: iso=\(minISO, privacy: .public)-\(maxISO, privacy: .public) shutter=\(minShutter, privacy: .public)-\(maxShutter, privacy: .public)s bias=\(minBias, privacy: .public)-\(maxBias, privacy: .public)")
         return CameraDeviceRanges(isoRange: minISO...maxISO,
                                   shutterRange: minShutter...maxShutter,
                                   biasRange: minBias...maxBias,
@@ -438,33 +520,45 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         let center = NotificationCenter.default
         let session = self.session
         sessionTokens.append(center.addObserver(forName: AVCaptureSession.runtimeErrorNotification,
-                                                object: session, queue: nil) { [weak self] _ in
+                                                object: session, queue: nil) { [weak self] note in
+            let error = note.userInfo?[AVCaptureSessionErrorKey] as? Error
+            Log.camera.error("session: runtime error \(error.map(Log.describe) ?? "unknown", privacy: .public)")
             self?.restartIfWanted()
         })
         sessionTokens.append(center.addObserver(forName: AVCaptureSession.wasInterruptedNotification,
-                                                object: session, queue: nil) { [weak self] _ in
+                                                object: session, queue: nil) { [weak self] note in
+            let reason = (note.userInfo?[AVCaptureSessionInterruptionReasonKey] as? NSNumber)?.intValue ?? -1
+            Log.camera.notice("session: interrupted reason=\(reason, privacy: .public)")
             self?.emit(.running(false))
         })
         sessionTokens.append(center.addObserver(forName: AVCaptureSession.interruptionEndedNotification,
                                                 object: session, queue: nil) { [weak self] _ in
+            Log.camera.notice("session: interruption ended")
             self?.restartIfWanted()
         })
         sessionTokens.append(center.addObserver(forName: AVCaptureSession.didStartRunningNotification,
                                                 object: session, queue: nil) { [weak self] _ in
+            Log.camera.info("session: did start running")
             self?.emit(.running(true))
         })
         sessionTokens.append(center.addObserver(forName: AVCaptureSession.didStopRunningNotification,
                                                 object: session, queue: nil) { [weak self] _ in
+            Log.camera.info("session: did stop running")
             self?.emit(.running(false))
         })
     }
 
     private func restartIfWanted() {
         sessionQueue.async { [self] in
-            guard wantsRunning, configured else { return }
+            guard wantsRunning, configured else {
+                Log.camera.info("session: restart skipped wantsRunning=\(self.wantsRunning, privacy: .public) configured=\(self.configured, privacy: .public)")
+                return
+            }
             if !session.isRunning {
+                Log.camera.notice("session: restarting")
                 session.startRunning()
             }
+            Log.camera.info("session: restart result running=\(self.session.isRunning, privacy: .public) interrupted=\(self.session.isInterrupted, privacy: .public)")
             emit(.running(session.isRunning))
         }
     }
@@ -482,7 +576,16 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     // MARK: - Device configuration helpers (session queue)
 
     private func withLockedDevice(_ body: (AVCaptureDevice) -> Void) {
-        guard let device, (try? device.lockForConfiguration()) != nil else { return }
+        guard let device else {
+            Log.camera.debug("device: no active device to configure")
+            return
+        }
+        do {
+            try device.lockForConfiguration()
+        } catch {
+            Log.camera.error("device: lockForConfiguration failed: \(Log.describe(error), privacy: .public)")
+            return
+        }
         body(device)
         device.unlockForConfiguration()
     }
@@ -492,6 +595,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     private func pointOfInterest(_ viewPoint: CGPoint, focusMode: AVCaptureDevice.FocusMode, meter: Bool) {
         withLockedDevice { device in
             let p = ViewfinderGeometry.devicePoint(fromViewfinder: viewPoint, isFront: device.position == .front)
+            Log.camera.debug("focus: point view=\(String(describing: viewPoint), privacy: .public) device=\(String(describing: p), privacy: .public) mode=\(focusMode.rawValue, privacy: .public) meter=\(meter, privacy: .public) afAuto=\(self.focusIsAuto, privacy: .public) aeAuto=\(self.exposureIsAuto, privacy: .public)")
             if focusIsAuto {
                 if device.isFocusPointOfInterestSupported {
                     device.focusPointOfInterest = p
@@ -515,6 +619,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     }
 
     private func applyIntent(_ intent: CameraIntent) {
+        Log.camera.info("intent: apply iso=\(String(describing: intent.iso), privacy: .public) shutter=\(String(describing: intent.shutter), privacy: .public) kelvin=\(String(describing: intent.kelvin), privacy: .public) lensPos=\(String(describing: intent.lensPosition), privacy: .public) bias=\(intent.bias, privacy: .public) aperture=\(String(describing: intent.aperture), privacy: .public) point=\(String(describing: intent.point), privacy: .public)")
         manualISO = intent.iso
         manualShutter = intent.shutter
         frozenISO = nil
@@ -536,6 +641,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     }
 
     private func applyFocusLocked(_ device: AVCaptureDevice, lensPosition: Float?, point: CGPoint?) {
+        Log.camera.debug("focus: apply lensPos=\(String(describing: lensPosition), privacy: .public) customSupported=\(device.isLockingFocusWithCustomLensPositionSupported, privacy: .public)")
         if let lensPosition, device.isLockingFocusWithCustomLensPositionSupported {
             focusIsAuto = false
             device.setFocusModeLocked(lensPosition: CameraMath.clamp(lensPosition, 0, 1), completionHandler: nil)
@@ -554,6 +660,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
 
     private func applyBiasLocked(_ device: AVCaptureDevice, _ ev: Float) {
         let bias = CameraMath.clamp(ev, device.minExposureTargetBias, max(device.maxExposureTargetBias, device.minExposureTargetBias))
+        Log.camera.debug("exposure: bias requested=\(ev, privacy: .public) applied=\(bias, privacy: .public)")
         device.setExposureTargetBias(bias, completionHandler: nil)
     }
 
@@ -565,9 +672,13 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             gains.redGain = CameraMath.clamp(gains.redGain, 1, maxGain)
             gains.greenGain = CameraMath.clamp(gains.greenGain, 1, maxGain)
             gains.blueGain = CameraMath.clamp(gains.blueGain, 1, maxGain)
+            Log.camera.debug("wb: locked kelvin=\(kelvin, privacy: .public) gains r=\(gains.redGain, privacy: .public) g=\(gains.greenGain, privacy: .public) b=\(gains.blueGain, privacy: .public)")
             device.setWhiteBalanceModeLocked(with: gains, completionHandler: nil)
         } else if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+            Log.camera.debug("wb: continuous auto (requested kelvin=\(String(describing: kelvin), privacy: .public))")
             device.whiteBalanceMode = .continuousAutoWhiteBalance
+        } else {
+            Log.camera.debug("wb: no supported mode for kelvin=\(String(describing: kelvin), privacy: .public)")
         }
     }
 
@@ -579,6 +690,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     /// remembered in `longExposure` and used at capture time.
     private func applyExposureLocked(_ device: AVCaptureDevice) {
         guard !exposureIsAuto, device.isExposureModeSupported(.custom) else {
+            Log.camera.debug("exposure: auto (manual requested=\(!self.exposureIsAuto, privacy: .public) customSupported=\(device.isExposureModeSupported(.custom), privacy: .public))")
             frozenISO = nil
             frozenDuration = nil
             simulatingLongExposure = false
@@ -611,6 +723,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             let wantedISO = Double(baseISO) * (wantSeconds / previewCap)
             let previewISO = min(wantedISO, Double(maxISO))
             let gain = Float(log2(max(wantedISO / previewISO, 1)))
+            Log.camera.info("exposure: long-exposure simulated want=\(wantSeconds, privacy: .public)s iso=\(baseISO, privacy: .public) preview=\(previewCap, privacy: .public)s@iso\(previewISO, privacy: .public) gainEV=\(gain, privacy: .public)")
             device.setExposureModeCustom(duration: Self.time(previewCap),
                                          iso: Float(previewISO),
                                          completionHandler: nil)
@@ -636,6 +749,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             } else {
                 iso = AVCaptureDevice.currentISO
             }
+            Log.camera.debug("exposure: custom duration=\(duration.seconds, privacy: .public)s iso=\(iso, privacy: .public) (current sentinel=\(iso == AVCaptureDevice.currentISO, privacy: .public)) wasSimulating=\(wasSimulating, privacy: .public)")
             device.setExposureModeCustom(duration: duration, iso: iso, completionHandler: nil)
             frames.previewGainEV = 0
             longExposure = nil
@@ -652,6 +766,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
 
     /// Full auto: centre continuous AF/AE, subject-area monitoring, auto WB, bias 0.
     func applyFullAuto() {
+        Log.camera.info("controls: full auto")
         tracker.stop()
         sessionQueue.async { [self] in
             manualISO = nil
@@ -672,6 +787,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     }
 
     func setExposure(iso: Float?, shutter: Double?) {
+        Log.camera.debug("exposure: set iso=\(String(describing: iso), privacy: .public) shutter=\(String(describing: shutter), privacy: .public)")
         sessionQueue.async { [self] in
             manualISO = iso
             manualShutter = shutter
@@ -686,6 +802,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     }
 
     func setWhiteBalance(kelvin: Float?) {
+        Log.camera.debug("wb: set kelvin=\(String(describing: kelvin), privacy: .public)")
         sessionQueue.async { [self] in
             withLockedDevice { applyWhiteBalanceLocked($0, kelvin: kelvin) }
         }
@@ -693,6 +810,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
 
     /// Manual f-number, or nil for automatic. See `ApertureSupport.swift`.
     func setAperture(_ fNumber: Float?) {
+        Log.camera.debug("aperture: set f=\(String(describing: fNumber), privacy: .public)")
         sessionQueue.async { [self] in
             withLockedDevice { applyAperture(fNumber, to: $0) }
         }
@@ -700,6 +818,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
 
     /// `nil` returns to continuous AF at `point` (nil = centre).
     func setManualFocus(_ lensPosition: Float?, point: CGPoint?) {
+        Log.camera.debug("focus: manual lensPos=\(String(describing: lensPosition), privacy: .public)")
         if lensPosition != nil { tracker.stop() }
         sessionQueue.async { [self] in
             withLockedDevice { applyFocusLocked($0, lensPosition: lensPosition, point: point) }
@@ -708,6 +827,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
 
     /// Tap: one-shot AF (unless focus is manual) + continuous AE (if exposure is auto) at the point.
     func focusOnce(at viewPoint: CGPoint) {
+        Log.camera.debug("focus: tap at \(String(describing: viewPoint), privacy: .public)")
         tracker.stop()
         sessionQueue.async { [self] in
             pointOfInterest(viewPoint, focusMode: .autoFocus, meter: true)
@@ -716,6 +836,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
 
     /// Back to centre continuous AF/AE and no tracking. Manual focus is released.
     func resetFocus() {
+        Log.camera.debug("focus: reset to centre")
         tracker.stop()
         sessionQueue.async { [self] in
             focusIsAuto = true
@@ -725,6 +846,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
 
     func startTracking(seed: CGRect) {
         let centre = CGPoint(x: seed.midX, y: seed.midY)
+        Log.camera.info("tracker: start seed=\(String(describing: seed), privacy: .public)")
         sessionQueue.async { [self] in
             focusIsAuto = true
             pointOfInterest(centre, focusMode: .continuousAutoFocus, meter: true)
@@ -733,11 +855,13 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     }
 
     func stopTracking() {
+        Log.camera.info("tracker: stop")
         tracker.stop()
     }
 
     private func trackerDidUpdate(_ rect: CGRect?) {
         guard let rect else {
+            Log.camera.info("tracker: subject lost")
             emit(.trackingLost)
             return
         }
@@ -752,6 +876,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     // MARK: - Capture controls
 
     func installCaptureControls(_ config: CaptureControlsConfig) {
+        Log.controls.info("controls: install requested stops=\(String(describing: config.zoomStops), privacy: .public) zoom=\(config.zoom, privacy: .public) bias=\(config.bias, privacy: .public) range=\(config.biasRange.lowerBound, privacy: .public)...\(config.biasRange.upperBound, privacy: .public) looks=\(config.lookCodes.count, privacy: .public) sel=\(config.selectedIndex, privacy: .public) ratios=\(config.ratioTitles.count, privacy: .public) ratioSel=\(config.ratioIndex, privacy: .public)")
         sessionQueue.async { [self] in
             controlsConfig = config
             installControls()
@@ -761,11 +886,18 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     /// Updates the Look picker's selection without rebuilding the controls.
     func updateLookSelection(_ index: Int) {
         sessionQueue.async { [self] in
-            guard var config = controlsConfig else { return }
+            guard var config = controlsConfig else {
+                Log.controls.debug("controls: look update \(index, privacy: .public) ignored, no config")
+                return
+            }
             config.selectedIndex = index
             controlsConfig = config
             if let look = installedControls.look, !config.lookCodes.isEmpty {
-                look.selectedIndex = CameraMath.clamp(index, 0, config.lookCodes.count - 1)
+                let clamped = CameraMath.clamp(index, 0, config.lookCodes.count - 1)
+                Log.controls.debug("controls: look picker set \(clamped, privacy: .public) (requested \(index, privacy: .public)) on session queue")
+                look.selectedIndex = clamped
+            } else {
+                Log.controls.debug("controls: look update \(index, privacy: .public) stored, picker not installed")
             }
         }
     }
@@ -776,7 +908,10 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             controlsConfig?.zoom = zoom
             guard let slider = installedControls.zoom, !installedControls.zoomValues.isEmpty else { return }
             let value = CaptureControlsInstaller.nearest(zoom, in: installedControls.zoomValues)
-            if slider.value != value { slider.value = value }
+            if slider.value != value {
+                Log.controls.debug("controls: zoom slider set \(value, privacy: .public) (zoom \(zoom, privacy: .public)) on session queue")
+                slider.value = value
+            }
         }
     }
 
@@ -786,20 +921,31 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             guard let slider = installedControls.bias, let bounds = installedControls.biasBounds else { return }
             // Out-of-range values would raise; snap to the slider's third stops.
             let snapped = min(max((bias * 3).rounded() / 3, bounds.lowerBound), bounds.upperBound)
-            if abs(slider.value - snapped) > 0.01 { slider.value = snapped }
+            if abs(slider.value - snapped) > 0.01 {
+                Log.controls.debug("controls: bias slider set \(snapped, privacy: .public) (bias \(bias, privacy: .public)) on session queue")
+                slider.value = snapped
+            }
         }
     }
 
     func updateControlRatio(_ index: Int) {
         sessionQueue.async { [self] in
             controlsConfig?.ratioIndex = index
-            guard let picker = installedControls.ratio, let config = controlsConfig, !config.ratioTitles.isEmpty else { return }
-            picker.selectedIndex = CameraMath.clamp(index, 0, config.ratioTitles.count - 1)
+            guard let picker = installedControls.ratio, let config = controlsConfig, !config.ratioTitles.isEmpty else {
+                Log.controls.debug("controls: ratio update \(index, privacy: .public) stored, picker not installed")
+                return
+            }
+            let clamped = CameraMath.clamp(index, 0, config.ratioTitles.count - 1)
+            Log.controls.debug("controls: ratio picker set \(clamped, privacy: .public) (requested \(index, privacy: .public)) on session queue")
+            picker.selectedIndex = clamped
         }
     }
 
     private func installControls() {
-        guard let config = controlsConfig, device != nil, configured else { return }
+        guard let config = controlsConfig, device != nil, configured else {
+            Log.controls.info("controls: install deferred config=\(self.controlsConfig != nil, privacy: .public) device=\(self.device != nil, privacy: .public) configured=\(self.configured, privacy: .public)")
+            return
+        }
         installedControls = CaptureControlsInstaller.install(on: session,
                                                              config: config,
                                                              delegate: controlsDelegate,
@@ -822,17 +968,24 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
                 }
                 guard let long = longExposure, let device, session.isRunning,
                       (try? device.lockForConfiguration()) != nil else {
+                    Log.capture.debug("exposure: prepare, no long-exposure switch (long=\(self.longExposure != nil, privacy: .public) running=\(self.session.isRunning, privacy: .public)) shutter=\(String(describing: seconds), privacy: .public)")
                     continuation.resume(returning: seconds)
                     return
                 }
                 let once = CameraResumeOnce(continuation)
+                let clock = ContinuousClock()
+                let began = clock.now
+                Log.capture.info("exposure: prepare long exposure \(long.duration.seconds, privacy: .public)s iso=\(long.iso, privacy: .public)")
                 frames.previewGainEV = 0
                 device.setExposureModeCustom(duration: long.duration, iso: long.iso) { _ in
+                    let ms = CameraLogText.ms(clock.now - began)
+                    Log.capture.info("exposure: long exposure applied after \(ms, privacy: .public)ms")
                     once.resume(returning: seconds)
                 }
                 device.unlockForConfiguration()
                 // Safety net in case the completion never fires.
                 sessionQueue.asyncAfter(deadline: .now() + long.duration.seconds * 3 + 1) {
+                    Log.capture.debug("exposure: long exposure safety timeout fired (no-op if already resumed)")
                     once.resume(returning: seconds)
                 }
             }
@@ -843,6 +996,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     func restorePreviewExposure() {
         sessionQueue.async { [self] in
             guard !exposureIsAuto else { return }
+            Log.capture.debug("exposure: restore preview exposure")
             withLockedDevice { applyExposureLocked($0) }
         }
     }
@@ -853,12 +1007,17 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<CapturedFrame, Error>) in
             sessionQueue.async { [self] in
                 guard session.isRunning, let device else {
+                    Log.capture.error("capture: camera unavailable running=\(self.session.isRunning, privacy: .public) device=\(self.device != nil, privacy: .public) interrupted=\(self.session.isInterrupted, privacy: .public)")
                     continuation.resume(throwing: UnprocError.cameraUnavailable)
                     return
                 }
                 let lens = self.lens ?? fallbackLens
                 let (settings, flavor) = makePhotoSettings()
                 applyCaptureOrientation(for: device)
+                let clock = ContinuousClock()
+                let began = clock.now
+                let inFlightCount = inFlight.count
+                Log.capture.notice("capture: begin id=\(settings.uniqueID, privacy: .public) lens=\(lens.id, privacy: .public) raw=\(CameraLogText.fourCC(settings.rawPhotoPixelFormatType), privacy: .public) flavor=\(flavor?.rawValue ?? "processed", privacy: .public) dims=\(CameraLogText.dims(settings.maxPhotoDimensions), privacy: .public) inFlight=\(inFlightCount, privacy: .public)")
 
                 let deviceExposure: (Double, Float) = longExposure.map { ($0.duration.seconds, $0.iso) }
                     ?? (device.exposureDuration.seconds, device.iso)
@@ -869,8 +1028,10 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
                     self?.sessionQueue.async { [weak self] in
                         self?.inFlight[id] = nil
                     }
+                    let ms = CameraLogText.ms(clock.now - began)
                     switch result {
                     case .success(let output):
+                        Log.capture.notice("capture: end id=\(id, privacy: .public) ok raw=\(output.raw?.count ?? 0, privacy: .public)B processed=\(output.processed?.count ?? 0, privacy: .public)B metaKeys=\(output.metadata.count, privacy: .public) in \(ms, privacy: .public)ms")
                         let exif = output.metadata[kCGImagePropertyExifDictionary as String] as? [String: Any]
                         let exifDuration = (exif?[kCGImagePropertyExifExposureTime as String] as? NSNumber)?.doubleValue
                         let exifISO = (exif?[kCGImagePropertyExifISOSpeedRatings as String] as? [NSNumber])?.first?.floatValue
@@ -886,6 +1047,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
                         )
                         continuation.resume(returning: frame)
                     case .failure(let error):
+                        Log.capture.error("capture: end id=\(id, privacy: .public) failed after \(ms, privacy: .public)ms: \(Log.describe(error), privacy: .public)")
                         continuation.resume(throwing: error)
                     }
                 }
@@ -910,6 +1072,12 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             choice = proRAW.map { ($0, RawFlavor.proRAW) } ?? bayer.map { ($0, RawFlavor.bayer) }
         }
 
+        let availableText = available.map(CameraLogText.fourCC).joined(separator: ",")
+        Log.capture.debug("capture: settings wanted=\(self.rawFlavor.rawValue, privacy: .public) available=[\(availableText, privacy: .public)] bayer=\(bayer.map(CameraLogText.fourCC) ?? "nil", privacy: .public) proRAW=\(proRAW.map(CameraLogText.fourCC) ?? "nil", privacy: .public)")
+        if let choice, choice.1 != rawFlavor {
+            Log.capture.notice("capture: wanted \(self.rawFlavor.rawValue, privacy: .public) unavailable, using \(choice.1.rawValue, privacy: .public)")
+        }
+
         let settings: AVCapturePhotoSettings
         if let choice {
             let (format, flavor) = choice
@@ -921,6 +1089,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         }
 
         let codec: AVVideoCodecType = photoOutput.availablePhotoCodecTypes.contains(.hevc) ? .hevc : .jpeg
+        Log.capture.notice("capture: no RAW available, processed codec=\(codec.rawValue, privacy: .public)")
         settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: codec])
         settings.photoQualityPrioritization = .speed
         settings.maxPhotoDimensions = photoOutput.maxPhotoDimensions
@@ -943,8 +1112,10 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             .filter { CaptureFormatPicker.area($0) <= CaptureFormatPicker.area(outputMax) }
         if let fitting = supported.filter({ CaptureFormatPicker.area($0) <= bayerLimit })
             .max(by: { CaptureFormatPicker.area($0) < CaptureFormatPicker.area($1) }) {
+            Log.capture.debug("capture: bayer dims \(CameraLogText.dims(fitting), privacy: .public) (output max \(CameraLogText.dims(outputMax), privacy: .public))")
             return fitting
         }
+        Log.capture.notice("capture: no bayer size <= 12.2MP; supported=\(supported.map(CameraLogText.dims).joined(separator: ","), privacy: .public)")
         return supported.min(by: { CaptureFormatPicker.area($0) < CaptureFormatPicker.area($1) }) ?? outputMax
     }
 
@@ -960,7 +1131,10 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         let angle = coordinator.videoRotationAngleForHorizonLevelCapture
         if connection.isVideoRotationAngleSupported(angle) {
             connection.videoRotationAngle = angle
+        } else {
+            Log.capture.notice("capture: rotation angle \(Double(angle), privacy: .public) unsupported")
         }
+        Log.capture.debug("capture: rotation angle \(Double(angle), privacy: .public)")
         if connection.isVideoMirroringSupported {
             connection.automaticallyAdjustsVideoMirroring = false
             connection.isVideoMirrored = device.position == .front
@@ -969,6 +1143,41 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
 }
 
 // MARK: - Small helpers
+
+/// String helpers for log messages.
+enum CameraLogText {
+    static func dims(_ d: CMVideoDimensions) -> String {
+        "\(d.width)x\(d.height)"
+    }
+
+    /// Four-character code ("bgg4") or the decimal value when not printable.
+    static func fourCC(_ code: OSType) -> String {
+        guard code != 0 else { return "0" }
+        let bytes = [UInt8((code >> 24) & 0xff), UInt8((code >> 16) & 0xff),
+                     UInt8((code >> 8) & 0xff), UInt8(code & 0xff)]
+        if bytes.allSatisfy({ $0 >= 0x20 && $0 < 0x7f }) {
+            return String(decoding: bytes, as: UTF8.self)
+        }
+        return String(code)
+    }
+
+    static func format(_ f: AVCaptureDevice.Format) -> String {
+        let video = CMVideoFormatDescriptionGetDimensions(f.formatDescription)
+        let subtype = CMFormatDescriptionGetMediaSubType(f.formatDescription)
+        let photo = f.supportedMaxPhotoDimensions.map(dims).joined(separator: ",")
+        let fps = f.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0
+        return "video=\(dims(video)) sub=\(fourCC(subtype)) photo=[\(photo)] maxFPS=\(fps) hq=\(f.isHighestPhotoQualitySupported) iso=\(f.minISO)-\(f.maxISO) maxZoom=\(f.videoMaxZoomFactor)"
+    }
+
+    static func lens(_ l: Lens) -> String {
+        "\(l.id)[dev=\(l.deviceID) zoom=\(l.zoom) crop=\(l.crop) \(l.kind.rawValue)]"
+    }
+
+    static func ms(_ d: Duration) -> Double {
+        let c = d.components
+        return (Double(c.seconds) * 1000 + Double(c.attoseconds) / 1e15).rounded() 
+    }
+}
 
 /// Coalesces bursts of KVO callbacks into at most one action per `interval`.
 final class CameraLiveThrottle: @unchecked Sendable {

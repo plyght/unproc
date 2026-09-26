@@ -1,5 +1,6 @@
 import Foundation
 import LockedCameraCapture
+import os
 
 /// Moves photos taken from the Lock Screen (written by the capture extension
 /// into its session content directories) into the Photos library, then
@@ -31,22 +32,26 @@ final class LockedCaptureImporter {
 
     func importPending() {
         let urls = LockedCameraCaptureManager.shared.sessionContentURLs
+        Log.lockscreen.info("import: pending sessions=\(urls.count, privacy: .public)")
         for url in urls { importSession(at: url) }
     }
 
     /// Watches for new session content while the app is running.
     func startObserving() {
         guard observeTask == nil else { return }
+        Log.lockscreen.info("import: observing session content updates")
         observeTask = Task { @MainActor [weak self] in
             for await update in LockedCameraCaptureManager.shared.sessionContentUpdates {
                 guard let self else { return }
                 switch update {
                 case .initial(let urls):
+                    Log.lockscreen.info("import: update initial sessions=\(urls.count, privacy: .public)")
                     for url in urls { self.importSession(at: url) }
                 case .added(let url):
+                    Log.lockscreen.info("import: update added \(url.lastPathComponent, privacy: .public)")
                     self.importSession(at: url)
                 case .removed:
-                    break
+                    Log.lockscreen.info("import: update removed")
                 @unknown default:
                     break
                 }
@@ -58,7 +63,10 @@ final class LockedCaptureImporter {
 
     private func importSession(at url: URL) {
         let key = url.standardizedFileURL
-        guard inFlight.insert(key).inserted else { return }
+        guard inFlight.insert(key).inserted else {
+            Log.lockscreen.debug("import: session \(key.lastPathComponent, privacy: .public) already in flight")
+            return
+        }
         Task { @MainActor in
             defer { self.inFlight.remove(key) }
             await self.run(session: key)
@@ -66,8 +74,14 @@ final class LockedCaptureImporter {
     }
 
     private func run(session dir: URL) async {
+        Log.lockscreen.notice("import: session \(dir.path, privacy: .public)")
         let found = await Self.findPhotos(in: dir)
-        guard let found else { return }  // unreadable right now: retry later
+        guard let found else {
+            Log.lockscreen.error("import: session unreadable, retry later \(dir.path, privacy: .public)")
+            return
+        }  // unreadable right now: retry later
+        let withDNG = found.pairs.filter { $0.dng != nil }.count
+        Log.lockscreen.info("import: found \(found.pairs.count, privacy: .public) photos (\(withDNG, privacy: .public) with DNG) orphans=\(found.hasOrphans, privacy: .public)")
 
         var done = loadDone()
         var allSaved = true
@@ -75,27 +89,39 @@ final class LockedCaptureImporter {
 
         for pair in found.pairs {
             let doneKey = Self.doneKey(session: dir, file: pair.jpeg)
-            if done.contains(doneKey) { continue }
+            let name = pair.jpeg.lastPathComponent
+            if done.contains(doneKey) {
+                Log.lockscreen.debug("import: \(name, privacy: .public) already imported, skipping")
+                continue
+            }
             do {
                 let photo = try await Self.load(pair)
-                _ = try await sink.save(photo)
+                Log.lockscreen.info("import: saving \(name, privacy: .public) jpeg=\(photo.jpeg.count, privacy: .public)B dng=\(photo.dng?.count ?? 0, privacy: .public)B")
+                let id = try await sink.save(photo)
                 done.insert(doneKey)
                 saveDone(done)
                 importedAny = true
+                Log.lockscreen.notice("import: saved \(name, privacy: .public) as \(id, privacy: .public)")
             } catch {
+                Log.lockscreen.error("import: failed \(name, privacy: .public): \(Log.describe(error), privacy: .public)")
                 allSaved = false
             }
         }
 
         if importedAny { await onImport?() }
-        guard allSaved, !found.hasOrphans else { return }
+        guard allSaved, !found.hasOrphans else {
+            Log.lockscreen.notice("import: keeping session (allSaved=\(allSaved, privacy: .public) orphans=\(found.hasOrphans, privacy: .public)) \(dir.lastPathComponent, privacy: .public)")
+            return
+        }
 
         do {
             try await LockedCameraCaptureManager.shared.invalidateSessionContent(at: dir)
             // Session content is gone: forget its bookkeeping.
             let prefix = Self.sessionPrefix(dir)
             saveDone(loadDone().filter { !$0.hasPrefix(prefix) })
+            Log.lockscreen.notice("import: session invalidated \(dir.lastPathComponent, privacy: .public)")
         } catch {
+            Log.lockscreen.error("import: invalidate failed \(dir.path, privacy: .public): \(Log.describe(error), privacy: .public)")
             // Keep the content and the bookkeeping; retried next time.
         }
     }
@@ -127,7 +153,10 @@ final class LockedCaptureImporter {
             at: dir,
             includingPropertiesForKeys: [.isRegularFileKey],
             options: [.skipsHiddenFiles]
-        ) else { return nil }
+        ) else {
+            Log.lockscreen.error("import: cannot enumerate \(dir.path, privacy: .public)")
+            return nil
+        }
 
         var jpegs: [String: URL] = [:]
         var dngs: [String: URL] = [:]
@@ -137,7 +166,8 @@ final class LockedCaptureImporter {
             switch file.pathExtension.lowercased() {
             case "jpg", "jpeg": jpegs[base] = file
             case "dng": dngs[base] = file
-            default: break
+            default:
+                Log.lockscreen.debug("import: ignoring \(file.lastPathComponent, privacy: .public)")
             }
         }
 
@@ -149,8 +179,15 @@ final class LockedCaptureImporter {
     }
 
     private nonisolated static func load(_ pair: PhotoPair) async throws -> DevelopedPhoto {
-        let jpeg = try Data(contentsOf: pair.jpeg, options: .mappedIfSafe)
-        let dng = try pair.dng.map { try Data(contentsOf: $0, options: .mappedIfSafe) }
+        let jpeg: Data
+        let dng: Data?
+        do {
+            jpeg = try Data(contentsOf: pair.jpeg, options: .mappedIfSafe)
+            dng = try pair.dng.map { try Data(contentsOf: $0, options: .mappedIfSafe) }
+        } catch {
+            Log.lockscreen.error("import: read failed \(pair.jpeg.lastPathComponent, privacy: .public): \(Log.describe(error), privacy: .public)")
+            throw error
+        }
         let values = try? pair.jpeg.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
         let date = values?.creationDate ?? values?.contentModificationDate ?? Date()
         return DevelopedPhoto(jpeg: jpeg, dng: dng, capturedAt: date)

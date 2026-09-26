@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Lock-screen sink: writes into the capture extension's session content
 /// directory, which the app imports into Photos after unlock.
@@ -22,9 +23,11 @@ final class SessionContentSink: CaptureSink {
 
     private static func write(_ photo: DevelopedPhoto, into root: URL) throws -> PhotoItem.ID {
         let fm = FileManager.default
+        Log.save.info("session sink: write jpeg=\(photo.jpeg.count, privacy: .public)B dng=\(photo.dng?.count ?? 0, privacy: .public)B into \(root.path, privacy: .public)")
         do {
             try fm.createDirectory(at: root, withIntermediateDirectories: true)
         } catch {
+            Log.save.error("session sink: create folder failed \(root.path, privacy: .public): \(Log.describe(error), privacy: .public)")
             throw UnprocError.saveFailed("Could not create folder: \(error.localizedDescription)")
         }
 
@@ -37,26 +40,34 @@ final class SessionContentSink: CaptureSink {
             name = "\(stem)-\(n)"
             n += 1
         }
+        if name != stem {
+            Log.save.notice("session sink: name collision, using \(name, privacy: .public)")
+        }
 
         let jpgURL = root.appendingPathComponent(name + ".jpg")
         if let dng = photo.dng {
             let dngURL = root.appendingPathComponent(name + ".dng")
             do {
                 try dng.write(to: dngURL, options: .atomic)
+                Log.save.info("session sink: wrote \(dngURL.lastPathComponent, privacy: .public) \(dng.count, privacy: .public)B")
             } catch {
+                Log.save.error("session sink: DNG write failed \(dngURL.path, privacy: .public): \(Log.describe(error), privacy: .public)")
                 throw UnprocError.saveFailed("DNG: \(error.localizedDescription)")
             }
         }
         do {
             try photo.jpeg.write(to: jpgURL, options: .atomic)
         } catch {
+            Log.save.error("session sink: JPEG write failed, retrying \(jpgURL.path, privacy: .public): \(Log.describe(error), privacy: .public)")
             // One retry: transient I/O hiccups shouldn't cost a shot.
             do {
                 try photo.jpeg.write(to: jpgURL, options: .atomic)
             } catch {
+                Log.save.error("session sink: JPEG retry failed \(jpgURL.path, privacy: .public): \(Log.describe(error), privacy: .public)")
                 throw UnprocError.saveFailed("JPEG: \(error.localizedDescription)")
             }
         }
+        Log.save.notice("session sink: wrote \(jpgURL.path, privacy: .public) \(photo.jpeg.count, privacy: .public)B")
         return jpgURL.path
     }
 

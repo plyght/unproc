@@ -1,5 +1,6 @@
 import LockedCameraCapture
 import SwiftUI
+import os
 
 /// Lock-screen / Control Centre / Action Button camera. Runs while the device
 /// is locked: no Photos access, no shared defaults. Photos are written into the
@@ -41,10 +42,20 @@ struct CaptureRootView: View {
         .persistentSystemOverlays(.hidden)
         .task {
             guard parts == nil else { return }
+            Log.lockscreen.notice("extension: launch, pulling settings")
+            let clock = ContinuousClock()
+            let began = clock.now
             if let settings = await Self.pullSettings(timeout: .milliseconds(600)) {
+                let pulledMs = CameraLogText.ms(clock.now - began)
+                let text = String(describing: settings)
+                Log.lockscreen.notice("extension: settings pulled in \(pulledMs, privacy: .public)ms \(text, privacy: .public)")
                 SettingsStore.shared.value = settings
+            } else {
+                let pulledMs = CameraLogText.ms(clock.now - began)
+                Log.lockscreen.notice("extension: no settings pulled (timeout or none) after \(pulledMs, privacy: .public)ms; using local")
             }
             let root = session.sessionContentURL
+            Log.lockscreen.info("extension: session content \(root.path, privacy: .public)")
             parts = Parts(
                 camera: CameraController(),
                 sink: SessionContentSink(root: root),
@@ -60,7 +71,13 @@ struct CaptureRootView: View {
             openFullApp: {
                 Task {
                     let activity = NSUserActivity(activityType: NSUserActivityTypeLockedCameraCapture)
-                    try? await session.openApplication(for: activity)
+                    Log.lockscreen.notice("extension: openApplication requested")
+                    do {
+                        try await session.openApplication(for: activity)
+                        Log.lockscreen.notice("extension: openApplication succeeded")
+                    } catch {
+                        Log.lockscreen.error("extension: openApplication failed: \(Log.describe(error), privacy: .public)")
+                    }
                 }
             },
             isLockedCapture: true
