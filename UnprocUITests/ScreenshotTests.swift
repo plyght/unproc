@@ -145,7 +145,8 @@ final class ScreenshotTests: XCTestCase {
         dragWhileCapturing(from: start, dy: -150, name: "16-zoom-scrub-in")
         settle()
         snap("17-zoom-after-scrub")
-        dragWhileCapturing(from: start, dy: 170, name: "18-zoom-force-selfie")
+        // Back to 1× with a tap-cycle-free drag: pull all the way down and keep forcing.
+        dragWhileCapturing(from: start, dy: 420, name: "18-zoom-force-selfie")
         settle()
         snap("19-selfie")
     }

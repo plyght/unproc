@@ -70,7 +70,7 @@ struct SettingsMenu: View {
 
     private func label(_ title: String) -> some View {
         Text(title)
-            .monoLabel(10, color: Theme.tertiary)
+            .monoLabel(10, color: Color.white.opacity(0.5))
             .lineLimit(1)
             .frame(width: Self.labelWidth, alignment: .leading)
     }

@@ -40,21 +40,19 @@ struct GlassSegmented: View {
                     } label: {
                         Text(segment.label)
                             .monoLabel(segment.fontSize, weight: selected ? .semibold : .medium,
-                                       color: selected ? Theme.accent : Theme.secondary)
+                                       color: selected ? Theme.accent : Color.white.opacity(0.72))
                             .fixedSize()
                             .padding(.horizontal, horizontalPadding)
                             .frame(minHeight: minHeight)
+                            // The glass sits on the label itself so the text renders on
+                            // top of it; only the selected option has real glass, and it
+                            // carries the shared id so it flows between options.
+                            .glassEffect(selected ? .regular.tint(Theme.accent.opacity(0.14)).interactive() : .identity,
+                                         in: .capsule)
+                            .glassEffectID(selected ? "selection" : segment.id, in: glass)
                             .contentShape(Capsule())
                     }
                     .buttonStyle(.pressable)
-                    .background {
-                        if selected {
-                            Capsule()
-                                .fill(Color.clear)
-                                .glassEffect(.regular.tint(Theme.accent.opacity(0.14)).interactive(), in: .capsule)
-                                .glassEffectID("selection", in: glass)
-                        }
-                    }
                     .accessibilityIdentifier(segment.accessibilityID)
                     .accessibilityAddTraits(selected ? .isSelected : [])
                 }
