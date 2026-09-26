@@ -142,27 +142,27 @@ final class ScreenshotTests: XCTestCase {
         settle()
         let start = lens.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
 
-        // Hold the lens button and drag left: zoom in on the inline dial.
-        dragWhileCapturing(from: start, dx: -150, name: "16-zoom-scrub-in")
+        // Hold the lens button and drag up: zoom in on the inline dial.
+        dragWhileCapturing(from: start, dy: -150, name: "16-zoom-scrub-in")
         settle(0.3)
         snap("17-zoom-after-scrub")
-        // Grab the dial and force it right, past .5×, toward the selfie flip.
+        // Grab the top of the (still showing) dial and force it down past .5×.
         let dial = app.descendants(matching: .any)["zoomDial"]
-        if dial.waitForExistence(timeout: 2) {
-            let centre = dial.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.5))
-            dragWhileCapturing(from: centre, dx: 260, name: "18-zoom-force-selfie", holdFirst: 0.05)
+        if dial.waitForExistence(timeout: 1) {
+            let top = dial.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.08))
+            dragWhileCapturing(from: top, dy: 300, name: "18-zoom-force-selfie", holdFirst: 0.05)
         }
         settle()
         snap("19-selfie")
     }
 
-    private func dragWhileCapturing(from start: XCUICoordinate, dx: CGFloat, name: String, holdFirst: TimeInterval = 0.4) {
+    private func dragWhileCapturing(from start: XCUICoordinate, dy: CGFloat, name: String, holdFirst: TimeInterval = 0.4) {
         let shots = Screens()
         DispatchQueue.global().asyncAfter(deadline: .now() + 1.6) {
             shots.image = XCUIScreen.main.screenshot()
         }
         start.press(forDuration: holdFirst,
-                    thenDragTo: start.withOffset(CGVector(dx: dx, dy: 0)),
+                    thenDragTo: start.withOffset(CGVector(dx: 0, dy: dy)),
                     withVelocity: .slow,
                     thenHoldForDuration: 1.6)
         if let image = shots.image {

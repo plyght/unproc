@@ -141,22 +141,19 @@ struct CameraScreen: View {
                 }
 
                 if zoomDialVisible {
-                    // In the black band between the viewfinder and the shutter; when a
-                    // tall ratio leaves no band, it floats (glass) just above the shutter.
-                    let gapTop = m.vfTop + m.vfHeight
-                    let band = m.shutterTop - gapTop
-                    let centreY = band >= ZoomDial.height + 12
-                        ? gapTop + band / 2
-                        : m.shutterTop - ZoomDial.height / 2 - 12
-                    ZoomDial(model: zoomScrub, width: m.vfWidth - 8) { dx in
-                        dialDrag(dx)
+                    // Inline beside the lens button: the ruler's marker is level with
+                    // the button's centre and the button sits over its trailing end.
+                    let lensCentreX = geo.size.width - m.barInset - Metrics.sideItem / 2
+                    let lensCentreY = m.barTop + m.barHeight / 2
+                    ZoomDial(model: zoomScrub) { dy in
+                        dialDrag(dy)
                     }
-                    .position(x: geo.size.width / 2, y: centreY)
+                    .position(x: lensCentreX + Metrics.sideItem / 2 - ZoomDial.width / 2, y: lensCentreY)
                     .transition(Theme.transition(
-                        .scale(scale: 0.92, anchor: .trailing).combined(with: .opacity),
+                        .scale(scale: 0.9, anchor: .trailing).combined(with: .opacity),
                         reduceMotion: reduceMotion
                     ))
-                    .zIndex(3)
+                    .zIndex(1)
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
@@ -469,7 +466,7 @@ struct CameraScreen: View {
                     closeFloating()
                     beginZoomScrub()
                 },
-                onScrubChange: { dx in perform(zoomScrub.update(dy: dx)) },
+                onScrubChange: { dy in perform(zoomScrub.update(dy: dy)) },
                 onScrubEnd: { endZoomScrub() }
             )
             .frame(width: Metrics.sideItem, height: Metrics.sideItem)
@@ -515,13 +512,13 @@ struct CameraScreen: View {
     }
 
     /// Drags on the dial itself (after it's shown).
-    private func dialDrag(_ dx: CGFloat?) {
-        guard let dx else {
+    private func dialDrag(_ dy: CGFloat?) {
+        guard let dy else {
             endZoomScrub()
             return
         }
         if !zoomScrub.isActive { beginZoomScrub() }
-        perform(zoomScrub.update(dy: dx))
+        perform(zoomScrub.update(dy: dy))
     }
 
     private func perform(_ action: ZoomScrubModel.Action?) {

@@ -3,9 +3,9 @@ import SwiftUI
 /// Bottom-right glass lens button.
 ///
 /// - Tap: next lens.
-/// - Press and hold (or start dragging sideways): the inline zoom dial appears;
-///   drag left to zoom in, right to zoom out, and keep forcing past .5× to
-///   flip to the selfie camera.
+/// - Press and hold (or start dragging vertically): the inline vertical zoom
+///   dial appears beside it; drag up to zoom in, down to zoom out, and keep
+///   forcing past .5× to flip to the selfie camera.
 ///
 /// One `DragGesture(minimumDistance: 0)` drives all three so a hold never
 /// also fires a tap and the drag continues seamlessly from the press.
@@ -49,11 +49,11 @@ struct LensButton: View {
                                 beginScrub()
                             }
                         }
-                        if !isScrubbing, abs(value.translation.width) > Self.dragToScrub {
+                        if !isScrubbing, abs(value.translation.height) > Self.dragToScrub {
                             beginScrub()
                         }
                         if isScrubbing {
-                            onScrubChange(value.translation.width)
+                            onScrubChange(value.translation.height)
                         }
                     }
                     .onEnded { _ in
@@ -71,7 +71,7 @@ struct LensButton: View {
             .sensoryFeedback(.impact(weight: .light), trigger: isScrubbing) { _, new in new }
             .accessibilityAddTraits(.isButton)
             .accessibilityLabel("Lens \(current?.buttonLabel ?? "")")
-            .accessibilityHint("Hold, then drag left to zoom in or right to zoom out")
+            .accessibilityHint("Hold, then drag up to zoom in or down to zoom out")
             .accessibilityIdentifier("lensButton")
     }
 
