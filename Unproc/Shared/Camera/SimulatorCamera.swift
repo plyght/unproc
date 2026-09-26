@@ -124,7 +124,7 @@ final class SimulatorCamera: @unchecked Sendable {
                 capturedAt: Date()
             )
         }
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<CapturedFrame, Error>) in
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<CapturedFrame, Error>) in
             queue.async { [self] in
                 let activeLens = self.lens ?? lens
                 let image = currentFrame ?? frame(for: activeLens)
