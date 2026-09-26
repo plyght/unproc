@@ -198,7 +198,8 @@ final class DemoCameraTests: XCTestCase {
     func testPreviewFramesArrive() async throws {
         let camera = try await startedCamera()
         defer { camera.stop() }
-        await waitUntil(timeout: 3, "a preview frame") { camera.frames.latestFrame != nil }
+        // First frame loads + renders the demo scene; slow CI simulators need headroom.
+        await waitUntil(timeout: 10, "a preview frame") { camera.frames.latestFrame != nil }
         if let frame = camera.frames.latestFrame {
             XCTAssertEqual(frame.extent.size, SimulatorCamera.frameSize)
         }
