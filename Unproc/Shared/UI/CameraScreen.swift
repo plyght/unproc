@@ -242,7 +242,7 @@ struct CameraScreen: View {
                     Log.ui.info("settings: output \(old.rawValue, privacy: .public) -> \(new.rawValue, privacy: .public)")
                 }
                 .onChange(of: settings.value.accent) { old, new in
-                    Log.ui.info("settings: accent \(old.rawValue, privacy: .public) -> \(new.rawValue, privacy: .public)")
+                    Log.ui.info("settings: accent \(old, privacy: .public) -> \(new, privacy: .public)")
                     DeviceAccent.refresh()
                 }
                 .onChange(of: settings.value.doubleExposure) { _, on in
