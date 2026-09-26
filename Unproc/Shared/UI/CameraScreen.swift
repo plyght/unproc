@@ -257,6 +257,9 @@ struct CameraScreen: View {
                         Log.ui.error("settings: look id \(id, privacy: .public) not in library")
                     }
                 }
+                .onChange(of: settings.value.flash) { _, flash in
+                    camera.flash = flash
+                }
                 .onChange(of: settings.value.ratio) { old, ratio in
                     Log.ui.info("settings: ratio \(old.rawValue, privacy: .public) -> \(ratio.rawValue, privacy: .public)")
                     camera.setCaptureControlsRatio(FrameRatio.allCases.firstIndex(of: ratio) ?? 0)
