@@ -1,0 +1,138 @@
+import XCTest
+
+/// Walks through the app in the Simulator (fed by the demo camera) and
+/// captures screenshots for CI. Every screenshot is attached with
+/// `.keepAlways`, then exported from the .xcresult by the workflow.
+final class ScreenshotTests: XCTestCase {
+    private var app: XCUIApplication!
+
+    override func setUp() {
+        continueAfterFailure = true
+        app = XCUIApplication()
+        app.launchArguments += ["-UNPROC_DEMO", "-UNPROC_RESET"]
+        app.launch()
+    }
+
+    func testTour() {
+        XCTAssertTrue(app.buttons["shutter"].waitForExistence(timeout: 15), "camera screen never appeared")
+        settle()
+        snap("01-camera")
+
+        // Take a couple of shots so the thumbnail and viewer have content.
+        app.buttons["shutter"].tap()
+        settle(2)
+        app.buttons["shutter"].tap()
+        settle(2)
+        snap("02-after-shot")
+
+        // Settings menu.
+        if tapIfPresent("statusBadge") {
+            settle()
+            snap("03-menu")
+            // A look and RAW output, then close.
+            tapIfPresent("menu.look.s1-01")
+            tapIfPresent("menu.format.raw")
+            settle()
+            snap("04-menu-look-raw")
+            if !tapIfPresent("menu.dismiss") { tapIfPresent("statusBadge") }
+            settle()
+            snap("05-look-applied")
+        }
+
+        // Other looks, via swipe on the viewfinder.
+        let viewfinder = app.descendants(matching: .any)["viewfinder"]
+        if viewfinder.exists {
+            for index in 0..<3 {
+                viewfinder.swipeLeft()
+                settle(0.4)
+                snap(String(format: "06-look-swipe-%d", index + 1))
+            }
+        }
+
+        // Lenses.
+        if tapIfPresent("lensButton") {
+            settle()
+            snap("07-lens-next")
+        }
+        let lensButton = app.buttons["lensButton"]
+        if lensButton.exists {
+            lensButton.press(forDuration: 0.8)
+            settle()
+            snap("08-lens-picker")
+            tapIfPresent("lens.back.wide")
+            settle()
+        }
+
+        // PRO mode.
+        if tapIfPresent("statusBadge") {
+            settle(0.5)
+            tapIfPresent("menu.pro.on")
+            tapIfPresent("menu.zebras.on")
+            tapIfPresent("menu.peaking.on")
+            if !tapIfPresent("menu.dismiss") { tapIfPresent("statusBadge") }
+            settle()
+            snap("09-pro")
+            if tapIfPresent("pro.shutter") {
+                settle()
+                snap("10-pro-shutter-dial")
+            }
+            if tapIfPresent("pro.iso") {
+                settle()
+                snap("11-pro-iso-dial")
+            }
+            if tapIfPresent("pro.aperture") {
+                settle()
+                snap("11b-pro-aperture-dial")
+            }
+        }
+
+        // Double exposure.
+        if tapIfPresent("statusBadge") {
+            settle(0.5)
+            tapIfPresent("menu.pro.off")
+            tapIfPresent("menu.double.on")
+            if !tapIfPresent("menu.dismiss") { tapIfPresent("statusBadge") }
+            settle()
+            tapIfPresent("shutter")
+            settle(2)
+            snap("12-double-exposure-first-frame")
+            tapIfPresent("shutter")
+            settle(2)
+        }
+
+        // Viewer.
+        if tapIfPresent("thumbnail") {
+            settle(1.5)
+            snap("13-viewer")
+            tapIfPresent("viewer.delete")
+            settle()
+            snap("14-viewer-deleted")
+            tapIfPresent("viewer.undo")
+            settle()
+            snap("15-viewer-undo")
+            tapIfPresent("viewer.close")
+            settle()
+        }
+    }
+
+    // MARK: - Helpers
+
+    @discardableResult
+    private func tapIfPresent(_ id: String, timeout: TimeInterval = 3) -> Bool {
+        let element = app.descendants(matching: .any)[id]
+        guard element.waitForExistence(timeout: timeout), element.isHittable else { return false }
+        element.tap()
+        return true
+    }
+
+    private func settle(_ seconds: TimeInterval = 1) {
+        RunLoop.current.run(until: Date().addingTimeInterval(seconds))
+    }
+
+    private func snap(_ name: String) {
+        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+}

@@ -91,3 +91,7 @@ see [ARCHITECTURE.md](ARCHITECTURE.md) for the module contracts.
 ## license
 
 MIT. see [LICENSE](LICENSE).
+
+## Credits
+
+`Unproc/App/DemoScene.jpg` (used only by the simulator demo feed for CI screenshots) is a photo from [Unsplash](https://unsplash.com/photos/1500530855697-b586d89ba3ee), used under the Unsplash License.

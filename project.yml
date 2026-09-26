@@ -76,6 +76,18 @@ targets:
         APPLICATION_EXTENSION_API_ONLY: YES
         SKIP_INSTALL: YES
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) UNPROC_WIDGETS
+  UnprocUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UnprocUITests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: lol.peril.unproc.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Unproc
+    dependencies:
+      - target: Unproc
 schemes:
   Unproc:
     build:
@@ -83,6 +95,9 @@ schemes:
         Unproc: all
         UnprocCapture: all
         UnprocWidgets: all
+    test:
+      targets:
+        - UnprocUITests
     run:
       config: Debug
     archive:
