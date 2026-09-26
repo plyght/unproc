@@ -157,7 +157,9 @@ jobs:
           for test in manifest:
               for a in test.get("attachments", []):
                   name = a.get("suggestedHumanReadableName") or a["exportedFileName"]
-                  base = name.split("_")[0] if name[:2].isdigit() else name
+                  if not name[:2].isdigit():
+                      continue  # only our named screenshots, not debug attachments
+                  base = name.split("_")[0]
                   ext = os.path.splitext(a["exportedFileName"])[1] or ".png"
                   if not base.endswith(ext):
                       base += ext

@@ -8,8 +8,22 @@ struct UnprocApp: App {
 
     // Created once for the lifetime of the app.
     @State private var camera = CameraController()
-    @State private var store = LibraryPhotoStore()
-    @State private var sink = PhotoLibrarySink()
+    @State private var store: any PhotoStore = Self.makeStore()
+    @State private var sink: any CaptureSink = Self.makeSink()
+
+    /// Demo mode (Simulator / CI screenshots) keeps photos in a local folder
+    /// instead of Photos, so it never depends on library permissions.
+    private static var demoRoot: URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("unproc-demo", isDirectory: true)
+    }
+
+    private static func makeStore() -> any PhotoStore {
+        CameraController.isDemo ? SessionPhotoStore(root: demoRoot) : LibraryPhotoStore()
+    }
+
+    private static func makeSink() -> any CaptureSink {
+        CameraController.isDemo ? SessionContentSink(root: demoRoot) : PhotoLibrarySink()
+    }
 
     var body: some Scene {
         WindowGroup {
