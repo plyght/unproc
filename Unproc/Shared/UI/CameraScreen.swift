@@ -622,26 +622,64 @@ private struct CameraHaptics: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            // Haptics — kept very light; only camera flips and errors are firm.
+            .modifier(ZoomHaptics(zoomScrub: zoomScrub))
+            .modifier(ShootingHaptics(
+                lookID: lookID,
+                showSettings: showSettings,
+                awaitingSecondExposure: awaitingSecondExposure,
+                shutterClosed: shutterClosed,
+                focusPoint: focusPoint,
+                isTracking: isTracking
+            ))
+    }
+}
+
+private struct ZoomHaptics: ViewModifier {
+    let zoomScrub: ZoomScrubModel
+
+    private static let fine: SensoryFeedback = .impact(flexibility: .soft, intensity: 0.22)
+    private static let flip: SensoryFeedback = .impact(weight: .heavy, intensity: 1)
+
+    private static func tension(_ old: Int, _ new: Int) -> SensoryFeedback? {
+        guard new > old else { return nil }
+        let intensity: Double = 0.25 + 0.15 * Double(new)
+        return .impact(flexibility: .soft, intensity: intensity)
+    }
+
+    func body(content: Content) -> some View {
+        content
             .sensoryFeedback(.selection, trigger: zoomScrub.detentTick)
-            .sensoryFeedback(.impact(flexibility: .soft, intensity: 0.22), trigger: zoomScrub.fineTick)
-            .sensoryFeedback(trigger: zoomScrub.tension) { old, new in
-                new > old ? .impact(flexibility: .soft, intensity: 0.25 + 0.15 * Double(new)) : nil
-            }
-            .sensoryFeedback(.impact(weight: .heavy, intensity: 1), trigger: zoomScrub.flipTick)
+            .sensoryFeedback(Self.fine, trigger: zoomScrub.fineTick)
+            .sensoryFeedback(trigger: zoomScrub.tension, Self.tension)
+            .sensoryFeedback(Self.flip, trigger: zoomScrub.flipTick)
+    }
+}
+
+private struct ShootingHaptics: ViewModifier {
+    let lookID: String
+    let showSettings: Bool
+    let awaitingSecondExposure: Bool
+    let shutterClosed: Bool
+    let focusPoint: CGPoint?
+    let isTracking: Bool
+
+    private static let menu: SensoryFeedback = .impact(flexibility: .soft, intensity: 0.4)
+
+    private static func when(_ feedback: SensoryFeedback) -> (Bool, Bool) -> SensoryFeedback? {
+        { _, new in new ? feedback : nil }
+    }
+
+    private static func focused(_ old: CGPoint?, _ new: CGPoint?) -> SensoryFeedback? {
+        new == nil ? nil : .impact(flexibility: .rigid, intensity: 0.35)
+    }
+
+    func body(content: Content) -> some View {
+        content
             .sensoryFeedback(.selection, trigger: lookID)
-            .sensoryFeedback(.impact(flexibility: .soft, intensity: 0.4), trigger: showSettings)
-            .sensoryFeedback(trigger: awaitingSecondExposure) { _, waiting in
-                waiting ? .impact(flexibility: .soft, intensity: 0.5) : nil
-            }
-            .sensoryFeedback(trigger: shutterClosed) { _, closed in
-                closed ? .impact(flexibility: .rigid, intensity: 0.45) : nil
-            }
-            .sensoryFeedback(trigger: focusPoint) { _, point in
-                point != nil ? .impact(flexibility: .rigid, intensity: 0.35) : nil
-            }
-            .sensoryFeedback(trigger: isTracking) { _, tracking in
-                tracking ? .impact(weight: .medium, intensity: 0.6) : nil
-            }
+            .sensoryFeedback(Self.menu, trigger: showSettings)
+            .sensoryFeedback(trigger: awaitingSecondExposure, Self.when(.impact(flexibility: .soft, intensity: 0.5)))
+            .sensoryFeedback(trigger: shutterClosed, Self.when(.impact(flexibility: .rigid, intensity: 0.45)))
+            .sensoryFeedback(trigger: focusPoint, Self.focused)
+            .sensoryFeedback(trigger: isTracking, Self.when(.impact(weight: .medium, intensity: 0.6)))
     }
 }
