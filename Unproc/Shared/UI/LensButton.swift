@@ -25,9 +25,7 @@ struct LensButton: View {
             .contentTransition(.numericText())
             .animation(Theme.snappy, value: current?.id)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background {
-                Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
-            }
+            .glassEffect(.regular.interactive(), in: .circle)
             .contentShape(Circle())
             .scaleEffect(isPressed ? 0.96 : 1)
             .animation(Theme.press, value: isPressed)
@@ -42,37 +40,31 @@ struct LensButton: View {
     }
 }
 
-/// Small Liquid Glass capsule listing every lens. Presented scaling out of the
-/// lens button (see `CameraScreen`).
+/// Liquid Glass capsule listing every lens; the current one sits under a
+/// glass selection that slides across as you pick. Presented growing out of
+/// the lens button (see `CameraScreen`).
 struct LensPicker: View {
-    static let height: CGFloat = 44
+    static let height: CGFloat = 48
 
     let lenses: [Lens]
     let current: Lens?
     let onSelect: (Lens) -> Void
 
     var body: some View {
-        GlassEffectContainer {
-            HStack(spacing: 2) {
-                ForEach(lenses) { lens in
-                    let selected = lens.id == current?.id
-                    Button {
-                        onSelect(lens)
-                    } label: {
-                        Text(lens.buttonLabel)
-                            .monoLabel(lens.isFront ? 10 : 12, weight: .semibold,
-                                       color: selected ? Theme.accent : Theme.primary)
-                            .frame(minWidth: 44, minHeight: Self.height - 4)
-                            .padding(.horizontal, 2)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.pressable)
-                    .accessibilityIdentifier("lens.\(lens.id)")
-                }
+        GlassSegmented(
+            segments: lenses.map {
+                GlassSegment(id: $0.id, label: $0.buttonLabel, accessibilityID: "lens.\($0.id)",
+                             fontSize: $0.isFront ? 10 : 12)
+            },
+            selectedID: current?.id,
+            spacing: 0,
+            minHeight: Self.height - 10,
+            horizontalPadding: 11,
+            onSelect: { id in
+                if let lens = lenses.first(where: { $0.id == id }) { onSelect(lens) }
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 2)
-            .glassEffect(.regular.interactive(), in: .capsule)
-        }
+        )
+        .padding(5)
+        .glassEffect(.regular.tint(Color.black.opacity(0.25)), in: .capsule)
     }
 }

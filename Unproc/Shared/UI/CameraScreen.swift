@@ -112,7 +112,11 @@ struct CameraScreen: View {
                 if showLensPicker {
                     LensPicker(lenses: camera.lenses, current: camera.currentLens) { lens in
                         select(lens)
-                        closeFloating()
+                        // Let the glass selection slide over before the picker folds away.
+                        Task {
+                            try? await Task.sleep(for: .milliseconds(280))
+                            closeFloating()
+                        }
                     }
                     .frame(height: LensPicker.height)
                     .frame(maxWidth: .infinity)
@@ -245,7 +249,7 @@ struct CameraScreen: View {
                 .animation(Theme.fade, value: look.id)
                 .padding(.horizontal, 20)
                 .padding(.vertical, 12)
-                .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .glassEffect(.regular.tint(Color.black.opacity(0.3)), in: .rect(cornerRadius: 16, style: .continuous))
                 .allowsHitTesting(false)
                 .transition(Theme.blurFade)
             }
@@ -267,9 +271,9 @@ struct CameraScreen: View {
                 } label: {
                     Text("OPEN UNPROC")
                         .monoLabel(9, weight: .semibold, color: Theme.primary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                        .background(Color.black.opacity(0.32), in: Capsule())
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .glassEffect(.regular.interactive(), in: .capsule)
                 }
                 .buttonStyle(.pressable)
                 .padding(12)

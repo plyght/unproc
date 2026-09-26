@@ -20,10 +20,8 @@ struct StatusBadge: View {
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
-            .background {
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(Color.black.opacity(0.62))
-            }
+            .glassEffect(.regular.tint(Color.black.opacity(0.3)).interactive(),
+                         in: .rect(cornerRadius: 11, style: .continuous))
             .contentShape(Rectangle())
         }
         .buttonStyle(.pressable)

@@ -41,6 +41,9 @@ enum Theme {
     static let exit = Animation.spring(response: 0.18, dampingFraction: 1.0)
     /// Press feedback on every pressable control.
     static let press = Animation.spring(response: 0.2, dampingFraction: 0.8)
+    /// Liquid Glass selection moving between options: a touch of give, like
+    /// the system's own glass controls.
+    static let glassSlide = Animation.spring(response: 0.34, dampingFraction: 0.78)
     /// Opacity-only fades (also the reduce-motion substitute for movement).
     static let fade = Animation.easeOut(duration: 0.18)
 

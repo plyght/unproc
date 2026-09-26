@@ -463,6 +463,8 @@ private struct ChromeButton: View {
             Image(systemName: systemName)
                 .font(.system(size: 17, weight: .medium))
                 .foregroundStyle(.white.opacity(isEnabled ? 1 : 0.28))
+                .frame(width: 44, height: 44)
+                .glassEffect(isEnabled ? .regular.interactive() : .regular, in: .circle)
                 .frame(width: 52, height: 48)
                 .contentShape(Rectangle())
         }
