@@ -46,6 +46,12 @@ struct InstalledCaptureControls {
 enum CaptureControlsInstaller {
     /// Replaces the session's controls with Zoom, Exposure, Look and Ratio.
     /// Call on the session queue.
+    ///
+    /// Actions are delivered on `delegateQueue` (the session queue), and that is
+    /// the only queue a control's value may be changed on — setting `value` /
+    /// `selectedIndex` from any other queue raises. All later syncing
+    /// (`CameraEngine.updateControl…`) therefore runs on the session queue, and
+    /// every callback hops to the main actor itself.
     static func install(on session: AVCaptureSession,
                         config: CaptureControlsConfig,
                         delegate: CaptureControlsDelegate,
@@ -70,7 +76,7 @@ enum CaptureControlsInstaller {
             zoom.prominentValues = config.zoomStops
             zoom.value = nearest(config.zoom, in: zoomValues)
             let onZoom = config.onZoom
-            zoom.setActionQueue(.main) { value in onZoom(value) }
+            zoom.setActionQueue(delegateQueue) { value in onZoom(value) }
             if session.canAddControl(zoom) {
                 session.addControl(zoom)
                 installed.zoom = zoom
@@ -87,7 +93,7 @@ enum CaptureControlsInstaller {
             bias.prominentValues = [0]
             bias.value = min(max(config.bias, lower), upper)
             let onBias = config.onBias
-            bias.setActionQueue(.main) { value in onBias(value) }
+            bias.setActionQueue(delegateQueue) { value in onBias(value) }
             if session.canAddControl(bias) {
                 session.addControl(bias)
                 installed.bias = bias
@@ -100,7 +106,7 @@ enum CaptureControlsInstaller {
                                             localizedIndexTitles: config.lookCodes)
             look.selectedIndex = CameraMath.clamp(config.selectedIndex, 0, config.lookCodes.count - 1)
             let onSelect = config.onSelect
-            look.setActionQueue(.main) { index in onSelect(index) }
+            look.setActionQueue(delegateQueue) { index in onSelect(index) }
             if session.canAddControl(look) {
                 session.addControl(look)
                 installed.look = look
@@ -112,7 +118,7 @@ enum CaptureControlsInstaller {
                                              localizedIndexTitles: config.ratioTitles)
             ratio.selectedIndex = CameraMath.clamp(config.ratioIndex, 0, config.ratioTitles.count - 1)
             let onRatio = config.onRatio
-            ratio.setActionQueue(.main) { index in onRatio(index) }
+            ratio.setActionQueue(delegateQueue) { index in onRatio(index) }
             if session.canAddControl(ratio) {
                 session.addControl(ratio)
                 installed.ratio = ratio
