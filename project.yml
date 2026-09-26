@@ -16,6 +16,11 @@ settings:
     DEAD_CODE_STRIPPING: YES
     CODE_SIGN_STYLE: Automatic
     DEVELOPMENT_TEAM: ""
+    # Every target ships a hand-written Info.plist (see INFOPLIST_FILE).
+    GENERATE_INFOPLIST_FILE: NO
+    SUPPORTS_MACCATALYST: NO
+    SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+    SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: NO
 targets:
   Unproc:
     type: application
@@ -33,7 +38,10 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) UNPROC_APP
     dependencies:
+      # extensionkit-extension -> "Embed ExtensionKit Extensions" phase
+      # ($(EXTENSIONS_FOLDER_PATH) = Unproc.app/Extensions)
       - target: UnprocCapture
+      # app-extension -> "Embed Foundation Extensions" phase (Unproc.app/PlugIns)
       - target: UnprocWidgets
   UnprocCapture:
     type: extensionkit-extension
@@ -48,6 +56,10 @@ targets:
         PRODUCT_NAME: UnprocCapture
         INFOPLIST_FILE: Unproc/CaptureExtension/Info.plist
         APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+        # XcodeGen has no preset for ExtensionKit products; the bundle lives
+        # at Unproc.app/Extensions/UnprocCapture.appex.
+        LD_RUNPATH_SEARCH_PATHS: ["$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks"]
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) UNPROC_EXTENSION
   UnprocWidgets:
     type: app-extension
@@ -62,6 +74,7 @@ targets:
         PRODUCT_NAME: UnprocWidgets
         INFOPLIST_FILE: Unproc/Widgets/Info.plist
         APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) UNPROC_WIDGETS
 schemes:
   Unproc:
