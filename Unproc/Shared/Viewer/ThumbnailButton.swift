@@ -38,11 +38,11 @@ struct ThumbnailButton: View {
                 ViewerHeroState.shared.setOpen(true, for: namespace)
                 action()
             }
-            let namespace = namespace
+            let heroNamespace = namespace
             Task {
                 try? await Task.sleep(for: .seconds(1))
                 withAnimation(ViewerStyle.ui) {
-                    ViewerHeroState.shared.revertIfNotPresented(namespace)
+                    ViewerHeroState.shared.revertIfNotPresented(heroNamespace)
                 }
             }
         } label: {
