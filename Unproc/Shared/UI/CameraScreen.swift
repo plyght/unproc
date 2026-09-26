@@ -447,7 +447,15 @@ struct CameraScreen: View {
                 current: camera.currentLens,
                 model: zoomScrub,
                 isExpanded: zoomDialVisible,
-                onTap: { cycleLens() },
+                onTap: { whileExpanded in
+                    if whileExpanded {
+                        zoomHideTask?.cancel()
+                        withAnimation(Theme.exit) { zoomDialVisible = false }
+                    } else {
+                        closeFloating()
+                        presentZoomRuler()
+                    }
+                },
                 onScrubBegin: {
                     closeFloating()
                     beginZoomScrub()
@@ -485,16 +493,29 @@ struct CameraScreen: View {
         }
     }
 
-    private func endZoomScrub() {
-        let action = zoomScrub.end()
-        withAnimation(Theme.exit) { perform(action) }
-        // Linger so the dial can be grabbed again, then fold away.
+    /// Tap: show the ruler without zooming, and leave it out a little longer
+    /// so it reads as "you can slide this".
+    private func presentZoomRuler() {
+        let lens = camera.currentLens
+        zoomScrub.present(stops: camera.zoomStops, zoom: lens?.zoom ?? 1, isFront: lens?.isFront == true)
+        withAnimation(Theme.snappy) { zoomDialVisible = true }
+        scheduleRulerHide(after: .milliseconds(3000))
+    }
+
+    private func scheduleRulerHide(after delay: Duration) {
         zoomHideTask?.cancel()
         zoomHideTask = Task {
-            try? await Task.sleep(for: .milliseconds(1600))
+            try? await Task.sleep(for: delay)
             guard !Task.isCancelled else { return }
             withAnimation(Theme.exit) { zoomDialVisible = false }
         }
+    }
+
+    private func endZoomScrub() {
+        let action = zoomScrub.end()
+        withAnimation(Theme.exit) { perform(action) }
+        // Linger so the ruler can be grabbed again, then fold away.
+        scheduleRulerHide(after: .milliseconds(1600))
     }
 
     private func perform(_ action: ZoomScrubModel.Action?) {
@@ -508,18 +529,6 @@ struct CameraScreen: View {
             if let back { select(back) }
         case nil:
             break
-        }
-    }
-
-    private func cycleLens() {
-        let lenses = camera.lenses
-        guard lenses.count > 1 else { return }
-        if let index = lenses.firstIndex(where: { $0.id == camera.currentLens?.id }) {
-            select(lenses[(index + 1) % lenses.count])
-        } else {
-            // Between stops after a scrub: go to the next real lens up.
-            let zoom = camera.currentLens?.zoom ?? 1
-            select(lenses.first { !$0.isFront && $0.zoom > zoom + 0.01 } ?? lenses[0])
         }
     }
 

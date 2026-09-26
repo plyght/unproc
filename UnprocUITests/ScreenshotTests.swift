@@ -53,7 +53,7 @@ final class ScreenshotTests: XCTestCase {
         // Lenses.
         if tapIfPresent("lensButton") {
             settle()
-            snap("07-lens-next")
+            snap("07-lens-tap-ruler")
         }
         // PRO mode.
         if tapIfPresent("statusBadge") {

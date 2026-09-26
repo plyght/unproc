@@ -118,6 +118,17 @@ final class ZoomScrubModel {
 
     // MARK: Gesture
 
+    /// Shows the scale at `zoom` without starting a drag (e.g. after a tap).
+    func present(stops: [CGFloat], zoom: CGFloat, isFront: Bool) {
+        self.stops = stops.isEmpty ? [1] : stops
+        self.isFront = isFront
+        self.zoom = zoom
+        position = isFront ? 0 : position(forZoom: zoom)
+        stretch = 0
+        flipProgress = 0
+        tension = 0
+    }
+
     func begin(stops: [CGFloat], zoom: CGFloat, isFront: Bool) {
         self.stops = stops.isEmpty ? [1] : stops
         self.isFront = isFront

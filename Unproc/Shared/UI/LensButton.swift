@@ -2,11 +2,12 @@ import SwiftUI
 
 /// Bottom-right lens button: the zoom number in a Liquid Glass circle.
 ///
-/// - Tap: next lens.
-/// - Press and hold (or start dragging vertically): the glass circle fades
+/// - Tap, press and hold, or start dragging vertically: the glass circle fades
 ///   away, the number stays where it is, and a vertical ruler appears through
 ///   it. Drag up to zoom in, down to zoom out; keep forcing past .5× to flip to
 ///   the selfie camera. Release and the ruler hides as the circle comes back.
+///   A plain tap opens the ruler (lingering longer, inviting a slide); a tap
+///   while it's out closes it.
 ///
 /// One `DragGesture(minimumDistance: 0)` drives all of it so a hold never
 /// also fires a tap and the drag continues seamlessly from the press.
@@ -15,7 +16,8 @@ struct LensButton: View {
     let model: ZoomScrubModel
     /// True while the ruler is showing (it lingers briefly after release).
     let isExpanded: Bool
-    let onTap: () -> Void
+    /// Tap with no drag: `true` when the ruler was already out.
+    let onTap: (_ whileExpanded: Bool) -> Void
     let onScrubBegin: () -> Void
     let onScrubChange: (CGFloat) -> Void
     let onScrubEnd: () -> Void
@@ -23,6 +25,8 @@ struct LensButton: View {
     @State private var isPressed = false
     @State private var isScrubbing = false
     @State private var holdTask: Task<Void, Never>?
+    @State private var moved = false
+    @State private var startedExpanded = false
 
     static let rulerSize = CGSize(width: 64, height: 232)
     private static let holdDelay: Duration = .milliseconds(260)
@@ -61,6 +65,8 @@ struct LensButton: View {
                 .onChanged { value in
                     if !isPressed {
                         isPressed = true
+                        moved = false
+                        startedExpanded = isExpanded
                         // Ruler already out: grab it straight away.
                         if isExpanded { beginScrub() }
                         holdTask?.cancel()
@@ -70,6 +76,7 @@ struct LensButton: View {
                             beginScrub()
                         }
                     }
+                    if abs(value.translation.height) > 4 { moved = true }
                     if !isScrubbing, abs(value.translation.height) > Self.dragToScrub {
                         beginScrub()
                     }
@@ -84,8 +91,10 @@ struct LensButton: View {
                     if isScrubbing {
                         isScrubbing = false
                         onScrubEnd()
+                        // A touch on the open ruler that never moved is a tap: close it.
+                        if startedExpanded && !moved { onTap(true) }
                     } else {
-                        onTap()
+                        onTap(false)
                     }
                 }
         )
