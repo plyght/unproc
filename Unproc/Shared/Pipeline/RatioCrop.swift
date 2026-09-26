@@ -6,7 +6,9 @@ import CoreImage
 enum RatioCrop {
     static func crop(_ image: CIImage, to ratio: FrameRatio) -> CIImage {
         let extent = image.extent
-        guard ratio != .fourThree, extent.width > 0, extent.height > 0,
+        // CGRect.infinite has a huge-but-finite width, so check isInfinite explicitly.
+        guard ratio != .fourThree, !extent.isInfinite, !extent.isEmpty,
+              extent.width > 0, extent.height > 0,
               extent.width.isFinite, extent.height.isFinite else { return image }
 
         let landscape = extent.width >= extent.height
