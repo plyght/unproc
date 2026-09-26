@@ -18,7 +18,7 @@ final class ZoomScrubModel {
     /// Track points per unit of ln(zoom).
     static let pointsPerLog: CGFloat = 72
     /// Raw overshoot needed to flip cameras.
-    static let flipDistance: CGFloat = 110
+    static let flipDistance: CGFloat = 80
     /// Rubber-band limit: visual overshoot approaches this but never reaches it.
     static let stretchLimit: CGFloat = 54
 
@@ -117,6 +117,25 @@ final class ZoomScrubModel {
     }
 
     // MARK: Gesture
+
+    /// Pinch-to-zoom: sets the zoom directly (clamped to the stops), with a
+    /// little magnetism at each lens stop and the same detent haptic.
+    /// Returns the zoom to apply.
+    func pinch(to requested: CGFloat) -> CGFloat {
+        guard let lo = stops.first, let hi = stops.last else { return requested }
+        var z = min(max(requested, lo), hi)
+        let nearest = stops.min { abs(log($0 / z)) < abs(log($1 / z)) }
+        var onStop: Int?
+        if let nearest, abs(log(nearest / z)) < 0.04 {
+            z = nearest
+            onStop = stops.firstIndex(of: nearest)
+        }
+        if let onStop, onStop != lastDetent { detentTick += 1 }
+        lastDetent = onStop
+        zoom = z
+        position = position(forZoom: z)
+        return z
+    }
 
     /// Shows the scale at `zoom` without starting a drag (e.g. after a tap).
     func present(stops: [CGFloat], zoom: CGFloat, isFront: Bool) {

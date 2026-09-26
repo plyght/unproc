@@ -18,7 +18,9 @@ final class SettingsTests: XCTestCase {
         XCTAssertFalse(d.peaking)
         XCTAssertNil(d.lensID)
         XCTAssertEqual(d.ratio, .fourThree)
-        XCTAssertEqual(d.accent, .auto)
+        XCTAssertEqual(d.accent, AccentID.orange)
+        XCTAssertEqual(d.flash, .off)
+        XCTAssertFalse(d.lefty)
     }
 
     func testDecodingEmptyObjectGivesDefaults() throws {
@@ -40,7 +42,7 @@ final class SettingsTests: XCTestCase {
         XCTAssertTrue(s.peaking)
         XCTAssertEqual(s.lensID, "back.tele")
         XCTAssertEqual(s.ratio, .fourThree)
-        XCTAssertEqual(s.accent, .auto)
+        XCTAssertEqual(s.accent, AccentID.orange)
     }
 
     func testDecodingUnknownEnumValuesFallsBackPerField() throws {
@@ -51,7 +53,8 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(s.output, .jpeg)
         XCTAssertEqual(s.rawFlavor, .bayer)
         XCTAssertEqual(s.ratio, .fourThree)
-        XCTAssertEqual(s.accent, .auto)
+        // Accent is a free-form finish id; unknown ids resolve to orange at display time.
+        XCTAssertEqual(s.accent, "purple")
         XCTAssertEqual(s.zebras, true, "wrongly typed value falls back to the default")
         XCTAssertEqual(s.lookID, "s1-02", "valid fields survive invalid neighbours")
     }
@@ -60,7 +63,7 @@ final class SettingsTests: XCTestCase {
         let s = try decode(#"{"lensID":null,"ratio":"16:9","futureSetting":42,"accent":"orange"}"#)
         XCTAssertNil(s.lensID)
         XCTAssertEqual(s.ratio, .sixteenNine)
-        XCTAssertEqual(s.accent, .orange)
+        XCTAssertEqual(s.accent, "orange")
     }
 
     func testDecodingNonObjectThrows() {
@@ -79,7 +82,9 @@ final class SettingsTests: XCTestCase {
         s.peaking = true
         s.lensID = "back.wide.crop2"
         s.ratio = .square
-        s.accent = .orange
+        s.accent = "cosmic-orange"
+        s.flash = .auto
+        s.lefty = true
         let data = try JSONEncoder().encode(s)
         XCTAssertEqual(try JSONDecoder().decode(CaptureSettings.self, from: data), s)
         XCTAssertLessThan(data.count, 4096, "must fit the capture intent's app context")
@@ -116,8 +121,10 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(OutputFormat.raw.rawValue, "raw")
         XCTAssertEqual(RawFlavor.bayer.rawValue, "bayer")
         XCTAssertEqual(RawFlavor.proRAW.rawValue, "proRAW")
-        XCTAssertEqual(AccentMode.auto.rawValue, "auto")
-        XCTAssertEqual(AccentMode.orange.rawValue, "orange")
+        XCTAssertEqual(FlashSetting.off.rawValue, "off")
+        XCTAssertEqual(FlashSetting.auto.rawValue, "auto")
+        XCTAssertEqual(FlashSetting.on.rawValue, "on")
+        XCTAssertEqual(AccentID.orange, "orange")
     }
 
     // MARK: Lens labels

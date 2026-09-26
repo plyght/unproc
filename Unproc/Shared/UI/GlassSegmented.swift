@@ -7,6 +7,8 @@ struct GlassSegment: Identifiable {
     /// Accessibility identifier (UI tests), e.g. "menu.format.raw".
     let accessibilityID: String
     var fontSize: CGFloat = 11
+    /// Optional colour for this option's label (e.g. an accent swatch).
+    var tint: Color? = nil
 }
 
 /// A row of text options where the selection is a Liquid Glass capsule that
@@ -40,14 +42,15 @@ struct GlassSegmented: View {
                     } label: {
                         Text(segment.label)
                             .monoLabel(segment.fontSize, weight: selected ? .semibold : .medium,
-                                       color: selected ? Theme.accent : Color.white.opacity(0.72))
+                                       color: segment.tint.map { selected ? $0 : $0.opacity(0.8) }
+                                           ?? (selected ? Theme.accent : Color.white.opacity(0.72)))
                             .fixedSize()
                             .padding(.horizontal, horizontalPadding)
                             .frame(minHeight: minHeight)
                             // The glass sits on the label itself so the text renders on
                             // top of it; only the selected option has real glass, and it
                             // carries the shared id so it flows between options.
-                            .glassEffect(selected ? .regular.tint(Theme.accent.opacity(0.14)).interactive() : .identity,
+                            .glassEffect(selected ? .regular.tint((segment.tint ?? Theme.accent).opacity(0.14)).interactive() : .identity,
                                          in: .capsule)
                             .glassEffectID(selected ? "selection" : segment.id, in: glass)
                             .contentShape(Capsule())

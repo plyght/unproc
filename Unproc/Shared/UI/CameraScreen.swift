@@ -19,6 +19,8 @@ struct CameraScreen: View {
     @State private var zoomScrub = ZoomScrubModel()
     @State private var zoomDialVisible = false
     @State private var zoomHideTask: Task<Void, Never>?
+    /// Zoom when the current pinch began.
+    @State private var pinchBase: CGFloat?
     @State private var proExpanded: ProControls.ProParameter?
     @State private var lookToast: Look?
     @State private var lookToastTick = 0
@@ -67,7 +69,7 @@ struct CameraScreen: View {
         static let gutter: CGFloat = 10
         static let sideItem: CGFloat = 52
 
-        init(size: CGSize, ratio: FrameRatio) {
+        init(size: CGSize, ratio: FrameRatio, landscape: Bool = false) {
             let gutter = Self.gutter
             let minBar: CGFloat = 104
             let refTop: CGFloat = 4
@@ -86,7 +88,8 @@ struct CameraScreen: View {
             barInset = gutter + 16
 
             // The actual viewfinder for this ratio.
-            let aspect = CGFloat(ratio.portraitAspect)
+            // Landscape selfie on the square front camera: a wide frame.
+            let aspect = CGFloat(landscape ? ratio.longOverShort : ratio.portraitAspect)
             var width = refWidth
             var height = width / aspect
             if height <= refHeight {
@@ -109,7 +112,7 @@ struct CameraScreen: View {
 
     var body: some View {
         GeometryReader { geo in
-            let m = Metrics(size: geo.size, ratio: settings.value.ratio)
+            let m = Metrics(size: geo.size, ratio: settings.value.ratio, landscape: camera.isLandscapeSelfie)
             ZStack(alignment: .top) {
                 viewfinder(m)
                     .frame(width: m.vfWidth, height: m.vfHeight)
@@ -287,7 +290,8 @@ struct CameraScreen: View {
                 },
                 onSwipe: { direction in
                     stepLook(direction)
-                }
+                },
+                onPinch: { handlePinch($0) }
             )
 
             if pro {
@@ -364,19 +368,16 @@ struct CameraScreen: View {
             .padding(12)
         }
         .overlay(alignment: .topLeading) {
-            if hooks.isLockedCapture, let openFullApp = hooks.openFullApp {
-                Button {
-                    openFullApp()
-                } label: {
-                    Text("OPEN UNPROC")
-                        .monoLabel(9, weight: .semibold, color: Theme.primary)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 7)
-                        .glassEffect(.regular.interactive(), in: .capsule)
+            VStack(alignment: .leading, spacing: 8) {
+                if camera.hasFlash {
+                    flashButton
+                } else if camera.supportsSelfieOrientation && camera.currentLens?.isFront == true {
+                    selfieOrientationButton
                 }
-                .buttonStyle(.pressable)
-                .padding(12)
+                openAppButton
             }
+            .padding(12)
+            .animation(Theme.snappy, value: camera.currentLens?.id)
         }
         .overlay(alignment: .bottom) {
             VStack(spacing: 8) {
@@ -453,12 +454,99 @@ struct CameraScreen: View {
 
     // MARK: - Bottom bar
 
+    // MARK: - Top-left buttons
+
+    private var flashButton: some View {
+        let flash = settings.value.flash
+        let symbol: String
+        switch flash {
+        case .off: symbol = "bolt.slash.fill"
+        case .auto: symbol = "bolt.badge.automatic.fill"
+        case .on: symbol = "bolt.fill"
+        }
+        return Button {
+            let all = FlashSetting.allCases
+            let next = all[((all.firstIndex(of: flash) ?? 0) + 1) % all.count]
+            Log.ui.info("ui: flash \(flash.rawValue, privacy: .public) -> \(next.rawValue, privacy: .public)")
+            settings.value.flash = next
+        } label: {
+            Image(systemName: symbol)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(flash == .off ? Theme.primary : Theme.accent)
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: 38, height: 38)
+                .glassEffect(.regular.interactive(), in: .circle)
+        }
+        .buttonStyle(.pressable)
+        .accessibilityLabel("Flash \(flash.rawValue)")
+        .accessibilityIdentifier("flashButton")
+    }
+
+    private var selfieOrientationButton: some View {
+        let landscape = camera.selfieLandscape
+        return Button {
+            withAnimation(Theme.snappy) { camera.selfieLandscape.toggle() }
+            Log.ui.info("ui: selfie orientation -> \(camera.selfieLandscape ? "landscape" : "portrait", privacy: .public)")
+        } label: {
+            Image(systemName: landscape ? "rectangle.portrait.rotate" : "rectangle.landscape.rotate")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(landscape ? Theme.accent : Theme.primary)
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: 38, height: 38)
+                .glassEffect(.regular.interactive(), in: .circle)
+        }
+        .buttonStyle(.pressable)
+        .accessibilityLabel(landscape ? "Portrait selfie" : "Landscape selfie")
+        .accessibilityIdentifier("selfieOrientationButton")
+    }
+
+    @ViewBuilder
+    private var openAppButton: some View {
+        if hooks.isLockedCapture, let openFullApp = hooks.openFullApp {
+            Button {
+                openFullApp()
+            } label: {
+                Text("OPEN UNPROC")
+                    .monoLabel(9, weight: .semibold, color: Theme.primary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .glassEffect(.regular.interactive(), in: .capsule)
+            }
+            .buttonStyle(.pressable)
+        }
+    }
+
+    // MARK: - Pinch to zoom
+
+    private func handlePinch(_ pinch: ViewfinderView.Pinch) {
+        guard let lens = camera.currentLens, !lens.isFront else { return }
+        switch pinch {
+        case .began:
+            closeFloating()
+            zoomHideTask?.cancel()
+            pinchBase = lens.zoom
+            zoomScrub.present(stops: camera.zoomStops, zoom: lens.zoom, isFront: false)
+            if !zoomDialVisible {
+                withAnimation(Theme.snappy) { zoomDialVisible = true }
+            }
+            Log.ui.info("ui: pinch begin at \(Double(lens.zoom), privacy: .public)x")
+        case .changed(let scale):
+            guard let base = pinchBase else { return }
+            let zoom = zoomScrub.pinch(to: base * scale)
+            camera.setZoom(zoom)
+        case .ended:
+            pinchBase = nil
+            Log.ui.info("ui: pinch end at \(Double(zoomScrub.zoom), privacy: .public)x")
+            scheduleRulerHide(after: .milliseconds(1200))
+        }
+    }
+
     private func bottomBar(_ m: Metrics) -> some View {
-        HStack(spacing: 0) {
-            ThumbnailButton(store: store, namespace: heroNamespace) {
-                Log.ui.info("ui: viewer open (\(store.items.count, privacy: .public) items)")
-                closeFloating()
-                withAnimation(Theme.snappy) { showViewer = true }
+        // Lefty: lens/zoom on the left, thumbnail on the right.
+        let lefty = settings.value.lefty
+        return HStack(spacing: 0) {
+            Group {
+                if lefty { lensButton(m) } else { thumbnailButton }
             }
             .frame(width: Metrics.sideItem, height: Metrics.sideItem)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -491,6 +579,25 @@ struct CameraScreen: View {
             }
             .animation(Theme.snappy, value: shutter.awaitingSecondExposure)
 
+            Group {
+                if lefty { thumbnailButton } else { lensButton(m) }
+            }
+            .frame(width: Metrics.sideItem, height: Metrics.sideItem)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(.horizontal, m.barInset)
+        .animation(Theme.snappy, value: lefty)
+    }
+
+    private var thumbnailButton: some View {
+        ThumbnailButton(store: store, namespace: heroNamespace) {
+            Log.ui.info("ui: viewer open (\(store.items.count, privacy: .public) items)")
+            closeFloating()
+            withAnimation(Theme.snappy) { showViewer = true }
+        }
+    }
+
+    private func lensButton(_ m: Metrics) -> some View {
             LensButton(
                 current: camera.currentLens,
                 model: zoomScrub,
@@ -516,10 +623,6 @@ struct CameraScreen: View {
                 onScrubChange: { dy in perform(zoomScrub.update(dy: dy)) },
                 onScrubEnd: { endZoomScrub() }
             )
-            .frame(width: Metrics.sideItem, height: Metrics.sideItem)
-            .frame(maxWidth: .infinity, alignment: .trailing)
-        }
-        .padding(.horizontal, m.barInset)
     }
 
     // MARK: - Actions
@@ -638,6 +741,7 @@ struct CameraScreen: View {
 
         hooks.setIdleTimerDisabled(true)
         camera.proEnabled = settings.value.proMode
+        camera.flash = settings.value.flash
         if camera.status != .running {
             await camera.start(preferredLensID: settings.value.lensID, rawFlavor: settings.value.rawFlavor)
         }

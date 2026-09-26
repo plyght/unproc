@@ -38,6 +38,41 @@ final class CameraController {
     @ObservationIgnored private var startTask: Task<Void, Never>?
     @ObservationIgnored private var captureTail: Task<Void, Never>?
 
+    /// Square Center Stage front camera (iPhone 17+): selfies can be portrait or
+    /// landscape without rotating the phone.
+    private(set) var supportsSelfieOrientation = false
+
+    /// Landscape selfie on the square front camera.
+    var selfieLandscape = false {
+        didSet {
+            guard demo == nil, selfieLandscape != oldValue else { return }
+            engine.setSelfieLandscape(selfieLandscape)
+        }
+    }
+
+    /// True when the frame being shot is landscape (square front, landscape selfie).
+    var isLandscapeSelfie: Bool {
+        selfieLandscape && supportsSelfieOrientation && currentLens?.isFront == true
+    }
+
+    /// Whether the current lens has a flash (every back camera shares the LED;
+    /// the front camera has none here).
+    var hasFlash: Bool { currentLens.map { !$0.isFront } ?? false }
+
+    /// Flash for the next shot. Ignored where unsupported (and on the front camera).
+    var flash: FlashSetting = .off {
+        didSet {
+            guard demo == nil else { return }
+            let mode: AVCaptureDevice.FlashMode
+            switch flash {
+            case .off: mode = .off
+            case .auto: mode = .auto
+            case .on: mode = .on
+            }
+            engine.setFlash(mode)
+        }
+    }
+
     /// Allowed range for manual white balance.
     static let kelvinRange: ClosedRange<Float> = 1800...12000
 
@@ -532,6 +567,7 @@ final class CameraController {
         updated.shutterRange = ranges.shutterRange
         updated.biasRange = ranges.biasRange
         updated.apertureStops = ranges.apertureStops
+        supportsSelfieOrientation = ranges.isSquareFront
         updated.manualAperture = updated.manualAperture.flatMap { Self.nearestStop(to: $0, in: ranges.apertureStops) }
         updated.manualISO = updated.manualISO.map { CameraMath.clamp($0, ranges.isoRange) }
         updated.manualShutter = updated.manualShutter.map { CameraMath.clamp($0, ranges.shutterRange) }

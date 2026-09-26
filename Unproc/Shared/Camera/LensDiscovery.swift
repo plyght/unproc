@@ -21,11 +21,14 @@ enum LensDiscovery {
         let ultra = back.first { $0.deviceType == .builtInUltraWideCamera }
         let wide = back.first { $0.deviceType == .builtInWideAngleCamera }
         let tele = back.first { $0.deviceType == .builtInTelephotoCamera }
-        let front = AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.builtInWideAngleCamera],
+        // iPhone 17+ front camera is a square Center Stage sensor exposed as a
+        // front *ultra-wide*; older phones have a front wide. Prefer the former.
+        let frontDevices = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInUltraWideCamera, .builtInWideAngleCamera],
             mediaType: .video,
             position: .front
-        ).devices.first
+        ).devices
+        let front = frontDevices.first { $0.deviceType == .builtInUltraWideCamera } ?? frontDevices.first
         let backText = back.map { "\($0.deviceType.rawValue)=\($0.uniqueID)" }.joined(separator: " ")
         Log.camera.info("lenses: back devices [\(backText, privacy: .public)] front=\(front?.uniqueID ?? "none", privacy: .public)")
 
@@ -139,6 +142,18 @@ enum CaptureFormatPicker {
     /// 1920×1440 (cheap preview) and full-range 4:2:0.
     /// Returns `nil` when nothing matches; the caller then uses the `.photo` preset.
     static func bestPhotoFormat(for device: AVCaptureDevice) -> AVCaptureDevice.Format? {
+        // Square Center Stage front sensor: the best square format that can crop
+        // both portrait and landscape (dynamic aspect ratio).
+        if device.position == .front {
+            let square = device.formats.filter { format in
+                let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+                guard dims.width > 0, dims.width == dims.height else { return false }
+                let ratios = format.supportedDynamicAspectRatios
+                return ratios.contains(.ratio3x4) && ratios.contains(.ratio4x3)
+                    && format.videoSupportedFrameRateRanges.contains { $0.maxFrameRate >= 29.9 }
+            }
+            if let best = square.max(by: { score($0) < score($1) }) { return best }
+        }
         let candidates = device.formats.filter { format in
             let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
             guard dims.width > 0, dims.height > 0 else { return false }
@@ -158,6 +173,14 @@ enum CaptureFormatPicker {
 
     static func area(_ d: CMVideoDimensions) -> Int {
         Int(d.width) * Int(d.height)
+    }
+
+    /// True for the square (portrait-mounted) Center Stage front sensor.
+    static func isSquareFront(_ device: AVCaptureDevice) -> Bool {
+        guard device.position == .front else { return false }
+        let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+        return dims.width > 0 && dims.width == dims.height
+            && !device.activeFormat.supportedDynamicAspectRatios.isEmpty
     }
 
     /// Lexicographic score: (photo pixels, -distance of video size to 1920×1440, full range).

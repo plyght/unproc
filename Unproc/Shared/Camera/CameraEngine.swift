@@ -1,4 +1,5 @@
 import AVFoundation
+import Synchronization
 import CoreImage
 import Foundation
 import ImageIO
@@ -13,6 +14,8 @@ struct CameraDeviceRanges: Equatable, Sendable {
     var biasRange: ClosedRange<Float>
     /// Selectable f-numbers; empty when the aperture is fixed.
     var apertureStops: [Float]
+    /// Square Center Stage front camera: can shoot portrait or landscape.
+    var isSquareFront: Bool = false
 }
 
 /// Throttled live readings of the active device.
@@ -93,6 +96,15 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     private var input: AVCaptureDeviceInput?
     private var lens: Lens?
     private var rawFlavor: RawFlavor = .bayer
+    /// Flash for the next capture (session queue).
+    private var flashMode: AVCaptureDevice.FlashMode = .off
+    /// Square front camera: shoot landscape while the phone is held upright.
+    private var selfieLandscape = false
+
+    /// Guards the frame-orientation fix (video queue → session queue).
+    private let rotationFixPending = Mutex(false)
+    /// `expectsLandscapeFrames`, readable from the video queue.
+    private let expectsLandscapeFramesCached = Mutex(false)
     private var rotationCoordinators: [String: AVCaptureDevice.RotationCoordinator] = [:]
     private var inFlight: [Int64: PhotoCaptureDelegate] = [:]
     private var deviceObservations: [NSKeyValueObservation] = []
@@ -345,6 +357,10 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         if lockedForFormat {
             newDevice.unlockForConfiguration()
         }
+        // Connections can be rebuilt on commit (notably for the front camera);
+        // re-apply rotation + mirroring to the final ones.
+        configureConnections(isFront: newDevice.position == .front)
+        applySelfieAspect()
 
         input = newInput
         device = newDevice
@@ -380,10 +396,28 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         }
     }
 
+    /// Preview rotation that makes frames upright in our portrait UI: 90° for
+    /// the usual landscape-mounted sensors, 0° for the portrait-mounted square
+    /// Center Stage front sensor (iPhone 17+).
+    private var previewAngle: CGFloat {
+        guard let device else { return 90 }
+        return CaptureFormatPicker.isSquareFront(device) ? 0 : 90
+    }
+
+    /// Whether preview frames should be landscape (square front, landscape selfie).
+    private var expectsLandscapeFrames: Bool {
+        guard let device else { return false }
+        return CaptureFormatPicker.isSquareFront(device) && selfieLandscape
+    }
+
     private func configureConnections(isFront: Bool) {
         if let connection = videoOutput.connection(with: .video) {
-            if connection.isVideoRotationAngleSupported(90) {
-                connection.videoRotationAngle = 90
+            let angle = previewAngle
+            if connection.isVideoRotationAngleSupported(angle) {
+                connection.videoRotationAngle = angle
+                Log.camera.info("preview: rotation \(Double(angle), privacy: .public) front=\(isFront, privacy: .public)")
+            } else {
+                Log.camera.error("preview: rotation \(Double(angle), privacy: .public) unsupported on video connection (front=\(isFront, privacy: .public))")
             }
             if connection.isVideoMirroringSupported {
                 connection.automaticallyAdjustsVideoMirroring = false
@@ -456,7 +490,8 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         return CameraDeviceRanges(isoRange: minISO...maxISO,
                                   shutterRange: minShutter...maxShutter,
                                   biasRange: minBias...maxBias,
-                                  apertureStops: availableApertures(for: device).sorted())
+                                  apertureStops: availableApertures(for: device).sorted(),
+                                  isSquareFront: CaptureFormatPicker.isSquareFront(device))
     }
 
     // MARK: - Device observation
@@ -569,6 +604,31 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        // Frames must arrive portrait (rotation 90). A landscape buffer means a
+        // connection lost its rotation (seen on the front camera): fix it on the
+        // session queue, at most once per burst.
+        let isLandscapeFrame = CVPixelBufferGetWidth(pixelBuffer) > CVPixelBufferGetHeight(pixelBuffer)
+        if isLandscapeFrame != expectsLandscapeFramesCached.withLock({ $0 }),
+           CVPixelBufferGetWidth(pixelBuffer) != CVPixelBufferGetHeight(pixelBuffer) {
+            let shouldFix = rotationFixPending.withLock { pending -> Bool in
+                if pending { return false }
+                pending = true
+                return true
+            }
+            if shouldFix {
+                let angle = connection.videoRotationAngle
+                sessionQueue.async { [self] in
+                    let isFront = device?.position == .front
+                    // Wrong shape: flip between the two sensor mountings (90° ↔ 0°).
+                    let next: CGFloat = angle == 90 ? 0 : 90
+                    Log.camera.error("preview: wrong frame orientation at angle=\(angle, privacy: .public) front=\(isFront, privacy: .public); switching to \(Double(next), privacy: .public)")
+                    if let video = videoOutput.connection(with: .video), video.isVideoRotationAngleSupported(next) {
+                        video.videoRotationAngle = next
+                    }
+                    rotationFixPending.withLock { $0 = false }
+                }
+            }
+        }
         frames.publish(CIImage(cvPixelBuffer: pixelBuffer))
         tracker.feed(pixelBuffer)
     }
@@ -873,6 +933,62 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         emit(.trackingUpdated(rect))
     }
 
+    // MARK: - Selfie orientation (square front sensor)
+
+    func setSelfieLandscape(_ landscape: Bool) {
+        sessionQueue.async { [self] in
+            selfieLandscape = landscape
+            applySelfieAspect()
+        }
+    }
+
+    /// Crops the square front sensor to portrait (3:4) or landscape (4:3).
+    private func applySelfieAspect() {
+        let wantsLandscape = expectsLandscapeFrames
+        expectsLandscapeFramesCached.withLock { $0 = wantsLandscape }
+        guard let device, CaptureFormatPicker.isSquareFront(device) else { return }
+        // Pick from the format's own list (keeps us independent of the type's name).
+        let supported = device.activeFormat.supportedDynamicAspectRatios
+        let match = supported.first { wantsLandscape ? $0 == .ratio4x3 : $0 == .ratio3x4 }
+        guard let ratio = match else {
+            Log.camera.error("selfie: aspect \(wantsLandscape ? "4x3" : "3x4", privacy: .public) unsupported by active format")
+            return
+        }
+        do {
+            try device.lockForConfiguration()
+        } catch {
+            Log.camera.error("selfie: lock failed: \(Log.describe(error), privacy: .public)")
+            return
+        }
+        device.setDynamicAspectRatio(ratio) { _, error in
+            if let error {
+                Log.camera.error("selfie: setDynamicAspectRatio failed: \(Log.describe(error), privacy: .public)")
+            } else {
+                Log.camera.info("selfie: aspect \(wantsLandscape ? "landscape 4x3" : "portrait 3x4", privacy: .public)")
+            }
+        }
+        device.unlockForConfiguration()
+    }
+
+    // MARK: - Flash
+
+    func setFlash(_ mode: AVCaptureDevice.FlashMode) {
+        sessionQueue.async { [self] in
+            flashMode = mode
+            Log.capture.info("flash: set \(mode.rawValue, privacy: .public)")
+        }
+    }
+
+    /// The requested flash if this output/config supports it, else off
+    /// (an unsupported mode would raise when capturing).
+    private func resolvedFlashMode() -> AVCaptureDevice.FlashMode {
+        guard flashMode != .off else { return .off }
+        let supported = photoOutput.supportedFlashModes
+        if supported.contains(flashMode) { return flashMode }
+        Log.capture.notice("flash: \(self.flashMode.rawValue, privacy: .public) unsupported here (supported=\(String(describing: supported.map(\.rawValue)), privacy: .public)); shooting without flash")
+        return .off
+    }
+
     // MARK: - Capture controls
 
     func installCaptureControls(_ config: CaptureControlsConfig) {
@@ -1084,7 +1200,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             settings = AVCapturePhotoSettings(rawPixelFormatType: format)
             settings.photoQualityPrioritization = .speed
             settings.maxPhotoDimensions = rawPhotoDimensions(for: flavor)
-            settings.flashMode = .off
+            settings.flashMode = resolvedFlashMode()
             return (settings, flavor)
         }
 
@@ -1093,7 +1209,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: codec])
         settings.photoQualityPrioritization = .speed
         settings.maxPhotoDimensions = photoOutput.maxPhotoDimensions
-        settings.flashMode = .off
+        settings.flashMode = resolvedFlashMode()
         return (settings, nil)
     }
 

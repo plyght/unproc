@@ -43,10 +43,17 @@ struct SettingsMenu: View {
             toggleRow("ZEBRAS", id: "zebras", isOn: value.zebras) { settings.value.zebras = $0 }
             toggleRow("PEAKING", id: "peaking", isOn: value.peaking) { settings.value.peaking = $0 }
 
-            row("ACCENT", id: "accent", selected: value.accent.rawValue,
-                options: [("auto", "AUTO"), ("orange", "ORANGE")]) {
-                settings.value.accent = AccentMode(rawValue: $0) ?? .auto
+            row("FLASH", id: "flash", selected: value.flash.rawValue,
+                options: [("off", "OFF"), ("auto", "AUTO"), ("on", "ON")]) {
+                settings.value.flash = FlashSetting(rawValue: $0) ?? .off
             }
+
+            row("HAND", id: "hand", selected: value.lefty ? "left" : "right",
+                options: [("right", "RIGHT"), ("left", "LEFT")]) {
+                settings.value.lefty = $0 == "left"
+            }
+
+            accentRow(selectedID: value.accent)
         }
         .padding(.leading, 18)
         .padding(.trailing, 12)
@@ -106,6 +113,40 @@ struct SettingsMenu: View {
     private func toggleRow(_ title: String, id: String, isOn: Bool, set: @escaping (Bool) -> Void) -> some View {
         row(title, id: id, selected: isOn ? "on" : "off", options: [("off", "OFF"), ("on", "ON")]) {
             set($0 == "on")
+        }
+    }
+
+    /// ORANGE plus the finishes of this phone model, each label in its colour.
+    private func accentRow(selectedID: String) -> some View {
+        let finishes = DeviceModel.finishes
+        let known = selectedID == AccentID.orange || finishes.contains { $0.id == selectedID }
+        let segments = [GlassSegment(id: AccentID.orange, label: "ORANGE", accessibilityID: "menu.accent.orange",
+                                     tint: DeviceAccent.orangeColor)]
+            + finishes.map {
+                GlassSegment(id: $0.id, label: $0.name, accessibilityID: "menu.accent.\($0.id)",
+                             tint: DeviceAccent.preview(of: $0))
+            }
+        return HStack(alignment: .center, spacing: 0) {
+            label("ACCENT")
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    GlassSegmented(
+                        segments: segments,
+                        selectedID: known ? selectedID : AccentID.orange,
+                        onSelect: { settings.value.accent = $0 }
+                    )
+                    .padding(.trailing, 28)
+                }
+                .scrollClipDisabled()
+                .mask {
+                    HStack(spacing: 0) {
+                        Color.black
+                        LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
+                            .frame(width: 28)
+                    }
+                }
+                .onAppear { proxy.scrollTo(selectedID, anchor: .center) }
+            }
         }
     }
 

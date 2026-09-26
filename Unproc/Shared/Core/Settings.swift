@@ -47,12 +47,14 @@ enum FrameRatio: String, Codable, CaseIterable, Sendable {
     var portraitAspect: Double { 1 / longOverShort }
 }
 
-/// Where the accent colour comes from.
-enum AccentMode: String, Codable, CaseIterable, Sendable {
-    /// The phone's own finish, when iOS will tell us (falls back to orange).
-    case auto
-    /// unproc's signal orange.
-    case orange
+/// Flash for the next shot.
+enum FlashSetting: String, Codable, CaseIterable, Sendable {
+    case off, auto, on
+}
+
+/// Accent ids: "orange" (unproc's signal orange) or a `DeviceModel.Finish.id`.
+enum AccentID {
+    static let orange = "orange"
 }
 
 /// Everything the user can change. Codable so it can be handed to the
@@ -68,11 +70,16 @@ struct CaptureSettings: Codable, Equatable, Sendable {
     /// `Lens.id` of the last lens used, restored on launch.
     var lensID: String? = nil
     var ratio: FrameRatio = .fourThree
-    var accent: AccentMode = .auto
+    /// "orange" or one of the phone's finishes (see `DeviceModel`). Older
+    /// builds stored "auto" here; anything unknown resolves to orange.
+    var accent: String = AccentID.orange
+    var flash: FlashSetting = .off
+    /// Left-handed layout: thumbnail and lens/zoom button swap sides.
+    var lefty: Bool = false
 
     // Spelled out (not synthesized) so helpers can name the type in signatures.
     enum CodingKeys: String, CodingKey {
-        case output, rawFlavor, lookID, doubleExposure, proMode, zebras, peaking, lensID, ratio, accent
+        case output, rawFlavor, lookID, doubleExposure, proMode, zebras, peaking, lensID, ratio, accent, flash, lefty
     }
 
     init() {}
@@ -98,6 +105,8 @@ struct CaptureSettings: Codable, Equatable, Sendable {
         lensID = Self.field(c, .lensID, d.lensID)
         ratio = Self.field(c, .ratio, d.ratio)
         accent = Self.field(c, .accent, d.accent)
+        flash = Self.field(c, .flash, d.flash)
+        lefty = Self.field(c, .lefty, d.lefty)
     }
 
     /// `decodeIfPresent` with a fallback; failures are logged, never thrown.

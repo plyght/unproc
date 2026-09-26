@@ -4,14 +4,11 @@ import CoreImage
 import Synchronization
 import os
 
-/// The app's single accent colour: the phone's own enclosure colour when it
-/// can be read (AUTO), otherwise unproc's signal orange.
-///
-/// There is no public API for the device colour. AUTO asks `UIDevice` for the
-/// private "DeviceEnclosureColor" key — fine for a sideloaded build, and it
-/// fails soft: if the selector is gone or iOS withholds the value, we keep the
-/// orange. The raw colour is then nudged so it stays legible as text on black
-/// and as a fill behind the shutter's black word.
+/// The app's single accent colour: unproc's signal orange, or the finish of
+/// the user's phone that they picked (iOS doesn't expose which finish a phone
+/// is, so `DeviceModel` lists the model's finishes and the user chooses). The
+/// finish colour is nudged so it stays legible as text on black and as a fill
+/// behind the shutter's black word.
 enum DeviceAccent {
     /// #FF5A1F — unproc's own accent.
     static let signalOrange = SIMD4<Float>(1.0, 90.0 / 255.0, 31.0 / 255.0, 1)
@@ -41,46 +38,24 @@ enum DeviceAccent {
     @MainActor
     @discardableResult
     static func refresh() -> SIMD4<Float> {
-        let value: SIMD4<Float>
-        let mode = SettingsStore.shared.value.accent
-        switch mode {
-        case .orange:
-            value = signalOrange
-        case .auto:
-            let enclosure = enclosureColor()
-            if enclosure == nil {
-                Log.settings.notice("accent: enclosure colour unavailable, falling back to signal orange")
-            }
-            value = enclosure.map(legible) ?? signalOrange
-        }
+        let id = SettingsStore.shared.value.accent
+        // The phone's own finishes first (ids like "gold" repeat across models
+        // with different shades), then any known finish.
+        let finish = DeviceModel.finishes.first { $0.id == id } ?? DeviceModel.finish(id: id)
+        let value = finish.flatMap { parseHex($0.hex) }.map(legible) ?? signalOrange
         storage.withLock { $0 = value }
-        let hex = hexString(value)
-        Log.settings.notice("accent: mode=\(mode.rawValue, privacy: .public) resolved rgb=\(value.x, privacy: .public),\(value.y, privacy: .public),\(value.z, privacy: .public) hex=\(hex, privacy: .public)")
+        Log.settings.notice("accent: id=\(id, privacy: .public) finish=\(finish?.name ?? "orange", privacy: .public) model=\(DeviceModel.identifier, privacy: .public) (\(DeviceModel.name ?? "unknown", privacy: .public)) hex=\(hexString(value), privacy: .public)")
         return value
     }
 
-    // MARK: - Device colour (private API, fails soft)
+    /// The legible accent a finish would give (for colouring menu labels).
+    static func preview(of finish: DeviceModel.Finish) -> Color {
+        let c = parseHex(finish.hex).map(legible) ?? signalOrange
+        return Color(.sRGB, red: Double(c.x), green: Double(c.y), blue: Double(c.z))
+    }
 
-    @MainActor
-    private static func enclosureColor() -> SIMD4<Float>? {
-        let device = UIDevice.current
-        for name in ["deviceInfoForKey:", "_deviceInfoForKey:"] {
-            let selector = NSSelectorFromString(name)
-            guard device.responds(to: selector) else {
-                Log.settings.notice("accent: UIDevice does not respond to \(name, privacy: .public)")
-                continue
-            }
-            guard let raw = device.perform(selector, with: "DeviceEnclosureColor")?.takeUnretainedValue() else {
-                Log.settings.notice("accent: \(name, privacy: .public) DeviceEnclosureColor returned nil")
-                continue
-            }
-            let rawText = String(describing: raw)
-            let rawType = String(describing: type(of: raw))
-            Log.settings.notice("accent: \(name, privacy: .public) DeviceEnclosureColor raw=\(rawText, privacy: .public) type=\(rawType, privacy: .public)")
-            if let string = raw as? String, let rgb = parseHex(string) { return rgb }
-            Log.settings.notice("accent: DeviceEnclosureColor value not a parseable hex colour")
-        }
-        return nil
+    static var orangeColor: Color {
+        Color(.sRGB, red: Double(signalOrange.x), green: Double(signalOrange.y), blue: Double(signalOrange.z))
     }
 
     private static func hexString(_ c: SIMD4<Float>) -> String {

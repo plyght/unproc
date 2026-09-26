@@ -24,6 +24,15 @@ struct ViewfinderView: UIViewRepresentable {
     var onLongPress: ((CGPoint) -> Void)? = nil
     /// +1 = swipe left (next), -1 = swipe right (previous).
     var onSwipe: ((Int) -> Void)? = nil
+    /// Two-finger pinch: spread to zoom in, pinch to zoom out.
+    var onPinch: ((Pinch) -> Void)? = nil
+
+    enum Pinch {
+        case began
+        /// Cumulative scale since the pinch began (1 = unchanged).
+        case changed(CGFloat)
+        case ended
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -85,6 +94,7 @@ struct ViewfinderView: UIViewRepresentable {
         coordinator.onDoubleTap = onDoubleTap
         coordinator.onLongPress = onLongPress
         coordinator.onSwipe = onSwipe
+        coordinator.onPinch = onPinch
     }
 
     // MARK: - Frame slot
@@ -139,6 +149,7 @@ struct ViewfinderView: UIViewRepresentable {
         var onDoubleTap: ((CGPoint) -> Void)?
         var onLongPress: ((CGPoint) -> Void)?
         var onSwipe: ((Int) -> Void)?
+        var onPinch: ((Pinch) -> Void)?
 
         // Logging state (first frame / size changes only, never per frame).
         private var renderedFrames = 0
@@ -278,6 +289,9 @@ struct ViewfinderView: UIViewRepresentable {
             let right = UISwipeGestureRecognizer(target: self, action: #selector(handleSwipe(_:)))
             right.direction = .right
             view.addGestureRecognizer(right)
+
+            let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+            view.addGestureRecognizer(pinch)
         }
 
         /// Maps a point in the view into normalised coordinates of the 3:4 frame,
@@ -313,6 +327,22 @@ struct ViewfinderView: UIViewRepresentable {
             let point = normalized(recognizer.location(in: view), in: view)
             Log.ui.debug("viewfinder: long press \(String(describing: point), privacy: .public)")
             onLongPress?(point)
+        }
+
+        @objc private func handlePinch(_ recognizer: UIPinchGestureRecognizer) {
+            switch recognizer.state {
+            case .began:
+                Log.ui.debug("viewfinder: pinch began")
+                onPinch?(.began)
+                onPinch?(.changed(recognizer.scale))
+            case .changed:
+                onPinch?(.changed(recognizer.scale))
+            case .ended, .cancelled, .failed:
+                Log.ui.debug("viewfinder: pinch ended scale=\(Double(recognizer.scale), privacy: .public)")
+                onPinch?(.ended)
+            default:
+                break
+            }
         }
 
         @objc private func handleSwipe(_ recognizer: UISwipeGestureRecognizer) {
