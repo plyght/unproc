@@ -17,6 +17,28 @@ enum RawFlavor: String, Codable, CaseIterable, Sendable {
     case proRAW
 }
 
+/// Frame shape of the photo (and viewfinder). The sensor is 4:3; other
+/// ratios are centre crops applied during development — the DNG stays full.
+enum FrameRatio: String, Codable, CaseIterable, Sendable {
+    case fourThree = "4:3"
+    case threeTwo = "3:2"
+    case sixteenNine = "16:9"
+    case square = "1:1"
+
+    /// Long side / short side.
+    var longOverShort: Double {
+        switch self {
+        case .fourThree: 4.0 / 3.0
+        case .threeTwo: 3.0 / 2.0
+        case .sixteenNine: 16.0 / 9.0
+        case .square: 1
+        }
+    }
+
+    /// Width / height when the phone is held upright.
+    var portraitAspect: Double { 1 / longOverShort }
+}
+
 /// Everything the user can change. Codable so it can be handed to the
 /// lock-screen extension through the capture intent's app context (≤ 4 KB).
 struct CaptureSettings: Codable, Equatable, Sendable {
@@ -29,6 +51,25 @@ struct CaptureSettings: Codable, Equatable, Sendable {
     var peaking: Bool = false
     /// `Lens.id` of the last lens used, restored on launch.
     var lensID: String? = nil
+    var ratio: FrameRatio = .fourThree
+
+    init() {}
+
+    // Tolerant decoding: settings saved by an older build (or pushed through
+    // the capture intent) may lack newer keys; those fall back to defaults.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = CaptureSettings()
+        output = (try? c.decodeIfPresent(OutputFormat.self, forKey: .output)) ?? d.output
+        rawFlavor = (try? c.decodeIfPresent(RawFlavor.self, forKey: .rawFlavor)) ?? d.rawFlavor
+        lookID = (try? c.decodeIfPresent(String.self, forKey: .lookID)) ?? d.lookID
+        doubleExposure = (try? c.decodeIfPresent(Bool.self, forKey: .doubleExposure)) ?? d.doubleExposure
+        proMode = (try? c.decodeIfPresent(Bool.self, forKey: .proMode)) ?? d.proMode
+        zebras = (try? c.decodeIfPresent(Bool.self, forKey: .zebras)) ?? d.zebras
+        peaking = (try? c.decodeIfPresent(Bool.self, forKey: .peaking)) ?? d.peaking
+        lensID = (try? c.decodeIfPresent(String.self, forKey: .lensID)) ?? d.lensID
+        ratio = (try? c.decodeIfPresent(FrameRatio.self, forKey: .ratio)) ?? d.ratio
+    }
 }
 
 /// Observable, persisted wrapper around `CaptureSettings`.

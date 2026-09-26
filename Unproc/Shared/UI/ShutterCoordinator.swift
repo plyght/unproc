@@ -62,6 +62,7 @@ final class ShutterCoordinator {
         let settings = SettingsStore.shared.value
         let look = LookLibrary.look(id: settings.lookID)
         let output = settings.output
+        let ratio = settings.ratio
 
         inFlight += 1
         pressCount += 1
@@ -70,7 +71,7 @@ final class ShutterCoordinator {
         let previous = tail
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.process(output: output, look: look, after: previous)
+            await self.process(output: output, look: look, ratio: ratio, after: previous)
             self.inFlight -= 1
         }
         tail = task
@@ -85,7 +86,7 @@ final class ShutterCoordinator {
 
     // MARK: - Pipeline
 
-    private func process(output: OutputFormat, look: Look, after previous: Task<Void, Never>?) async {
+    private func process(output: OutputFormat, look: Look, ratio: FrameRatio, after previous: Task<Void, Never>?) async {
         // 1. Capture (the camera serialises concurrent requests).
         let frame: CapturedFrame
         do {
@@ -100,7 +101,8 @@ final class ShutterCoordinator {
         // 2. Develop off main, concurrently with any earlier press still finishing.
         let developed: Result<ShotImage, Error>
         do {
-            developed = .success(try await ShutterWork.develop(frame))
+            let shot = try await ShutterWork.develop(frame)
+            developed = .success(ShotImage(image: RatioCrop.crop(shot.image, to: ratio)))
         } catch {
             developed = .failure(error)
         }

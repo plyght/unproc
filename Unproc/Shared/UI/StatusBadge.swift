@@ -12,6 +12,7 @@ struct StatusBadge: View {
                 Text(LookLibrary.look(id: settings.lookID).code)
                     .monoLabel(11, weight: .bold, color: Theme.accent)
                 HStack(spacing: 4) {
+                    if settings.ratio != .fourThree { tag(settings.ratio.rawValue) }
                     if settings.doubleExposure { tag("2×EXP") }
                     if settings.proMode { tag("PRO") }
                     Text(settings.output == .raw ? "RAW" : "JPEG")

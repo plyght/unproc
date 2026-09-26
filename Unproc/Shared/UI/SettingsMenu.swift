@@ -31,6 +31,11 @@ struct SettingsMenu: View {
                 .transition(.opacity)
             }
 
+            row("RATIO", id: "ratio", selected: value.ratio.rawValue,
+                options: FrameRatio.allCases.map { ($0.rawValue, $0.rawValue) }) {
+                settings.value.ratio = FrameRatio(rawValue: $0) ?? .fourThree
+            }
+
             lookRow(selectedID: value.lookID)
 
             toggleRow("DOUBLE EXP", id: "double", isOn: value.doubleExposure) { settings.value.doubleExposure = $0 }

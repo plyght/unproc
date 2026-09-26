@@ -101,6 +101,32 @@ final class ScreenshotTests: XCTestCase {
             settle(2)
         }
 
+        // Frame ratios.
+        for (id, name) in [("16:9", "16x9"), ("1:1", "1x1"), ("3:2", "3x2")] {
+            if tapIfPresent("statusBadge") {
+                settle(0.5)
+                tapIfPresent("menu.double.off")
+                tapIfPresent("menu.ratio.\(id)")
+                if !tapIfPresent("menu.dismiss") { tapIfPresent("statusBadge") }
+                settle()
+                snap("12b-ratio-\(name)")
+            }
+        }
+        if tapIfPresent("statusBadge") {
+            settle(0.5)
+            tapIfPresent("menu.pro.on")
+            tapIfPresent("menu.ratio.16:9")
+            if !tapIfPresent("menu.dismiss") { tapIfPresent("statusBadge") }
+            settle()
+            snap("12c-ratio-16x9-pro")
+            tapIfPresent("statusBadge")
+            settle(0.5)
+            tapIfPresent("menu.pro.off")
+            tapIfPresent("menu.ratio.4:3")
+            if !tapIfPresent("menu.dismiss") { tapIfPresent("statusBadge") }
+            settle()
+        }
+
         // Viewer.
         waitForPhotos()
         if tapIfPresent("thumbnail") {

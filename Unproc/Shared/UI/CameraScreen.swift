@@ -38,6 +38,12 @@ struct CameraScreen: View {
 
     // MARK: - Layout
 
+    /// Layout for one screen size and frame ratio.
+    ///
+    /// Everything is placed relative to a fixed 3:4 "reference" frame so the
+    /// controls never move when the ratio changes. Shorter ratios (1:1) sit
+    /// centred inside it; taller ones (3:2, 16:9) grow downward, and when they
+    /// reach the bottom bar the bar simply floats over the image.
     private struct Metrics {
         let vfTop: CGFloat
         let vfWidth: CGFloat
@@ -48,27 +54,49 @@ struct CameraScreen: View {
         let shutterHeight: CGFloat
         /// Side items (thumbnail, lens) are inset so their centres mirror each other.
         let barInset: CGFloat
+        /// How far the bottom bar reaches into the viewfinder (0 when it doesn't).
+        let barOverlap: CGFloat
         /// Top of the shutter pill, for placing popovers above it.
         var shutterTop: CGFloat { barTop + (barHeight - shutterHeight) / 2 }
 
         static let gutter: CGFloat = 10
         static let sideItem: CGFloat = 52
 
-        init(size: CGSize) {
+        init(size: CGSize, ratio: FrameRatio) {
             let gutter = Self.gutter
             let minBar: CGFloat = 104
-            vfTop = 4
+            let refTop: CGFloat = 4
+
+            // The 3:4 reference frame and the bar below it.
             let byWidth = max(size.width - gutter * 2, 0)
-            let byHeight = max(size.height - vfTop - minBar, 0) * Theme.frameAspect
-            vfWidth = min(byWidth, byHeight)
-            vfHeight = vfWidth / Theme.frameAspect
-            let remaining = max(size.height - vfTop - vfHeight, 0)
+            let byHeight = max(size.height - refTop - minBar, 0) * Theme.frameAspect
+            let refWidth = min(byWidth, byHeight)
+            let refHeight = refWidth / Theme.frameAspect
+            let remaining = max(size.height - refTop - refHeight, 0)
             barHeight = min(max(remaining * 0.6, 84), 120)
-            barTop = vfTop + vfHeight + max((remaining - barHeight) / 2, 0)
+            barTop = refTop + refHeight + max((remaining - barHeight) / 2, 0)
             let compact = size.width < 380 || remaining < 150
             shutterWidth = compact ? 116 : 132
             shutterHeight = compact ? 56 : 64
             barInset = gutter + 16
+
+            // The actual viewfinder for this ratio.
+            let aspect = CGFloat(ratio.portraitAspect)
+            var width = refWidth
+            var height = width / aspect
+            if height <= refHeight {
+                vfTop = refTop + (refHeight - height) / 2
+            } else {
+                let maxHeight = max(size.height - refTop - 4, 0)
+                if height > maxHeight {
+                    height = maxHeight
+                    width = height * aspect
+                }
+                vfTop = refTop
+            }
+            vfWidth = width
+            vfHeight = height
+            barOverlap = max(vfTop + vfHeight - barTop, 0)
         }
     }
 
@@ -76,18 +104,17 @@ struct CameraScreen: View {
 
     var body: some View {
         GeometryReader { geo in
-            let m = Metrics(size: geo.size)
+            let m = Metrics(size: geo.size, ratio: settings.value.ratio)
             ZStack(alignment: .top) {
-                VStack(spacing: 0) {
-                    Color.clear.frame(height: m.vfTop)
-                    viewfinder(m)
-                        .frame(width: m.vfWidth, height: m.vfHeight)
-                    Color.clear.frame(height: max(m.barTop - m.vfTop - m.vfHeight, 0))
-                    bottomBar(m)
-                        .frame(height: m.barHeight)
-                    Spacer(minLength: 0)
-                }
-                .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
+                viewfinder(m)
+                    .frame(width: m.vfWidth, height: m.vfHeight)
+                    .padding(.top, m.vfTop)
+                    .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
+
+                bottomBar(m)
+                    .frame(height: m.barHeight)
+                    .padding(.top, m.barTop)
+                    .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
 
                 // Tap-outside catcher for the settings menu / lens picker.
                 if showSettings || showLensPicker {
@@ -147,6 +174,7 @@ struct CameraScreen: View {
         .animation(Theme.snappy, value: showSettings)
         .animation(Theme.snappy, value: showLensPicker)
         .animation(Theme.snappy, value: settings.value.proMode)
+        .animation(Theme.snappy, value: settings.value.ratio)
         .animation(Theme.fade, value: longExposureStart)
         .environment(\.colorScheme, .dark)
         .statusBarHidden(true)
@@ -224,11 +252,18 @@ struct CameraScreen: View {
             )
 
             if pro {
-                FocusOverlay(
-                    point: camera.focus.point,
-                    isTracking: camera.focus.isTracking,
-                    trackedRect: camera.focus.trackedRect
-                )
+                // FocusOverlay works in the 3:4 sensor frame; aspect-fill that
+                // frame into the viewfinder so points line up at any ratio.
+                Color.clear
+                    .aspectRatio(Theme.frameAspect, contentMode: .fill)
+                    .overlay {
+                        FocusOverlay(
+                            point: camera.focus.point,
+                            isTracking: camera.focus.isTracking,
+                            trackedRect: camera.focus.trackedRect
+                        )
+                    }
+                    .allowsHitTesting(false)
             }
 
             Color.black
@@ -300,7 +335,7 @@ struct CameraScreen: View {
                 }
             }
             .padding(.horizontal, 14)
-            .padding(.bottom, 14)
+            .padding(.bottom, 14 + m.barOverlap)
             .animation(Theme.snappy, value: shutter.lastError)
         }
         .animation(Theme.fade, value: lookToast == nil)
