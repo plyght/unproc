@@ -179,6 +179,7 @@ final class SimulatorCamera: @unchecked Sendable {
         } else {
             rendered = image
         }
+        if cache.count > 24 { cache.removeAll(keepingCapacity: true) }
         cache[lens.id] = rendered
         return rendered
     }

@@ -55,15 +55,6 @@ final class ScreenshotTests: XCTestCase {
             settle()
             snap("07-lens-next")
         }
-        let lensButton = app.buttons["lensButton"]
-        if lensButton.exists {
-            lensButton.press(forDuration: 0.8)
-            settle()
-            snap("08-lens-picker")
-            tapIfPresent("lens.back.wide")
-            settle()
-        }
-
         // PRO mode.
         if tapIfPresent("statusBadge") {
             settle(0.5)
@@ -141,6 +132,43 @@ final class ScreenshotTests: XCTestCase {
             tapIfPresent("viewer.close")
             settle()
         }
+    }
+
+    /// Holds the lens button and drags, capturing the zoom track mid-gesture
+    /// (XCTest blocks during the drag, so screenshots come from a background queue).
+    func testZoomScrub() {
+        let lens = app.descendants(matching: .any)["lensButton"]
+        XCTAssertTrue(lens.waitForExistence(timeout: 15))
+        settle()
+        let start = lens.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+
+        dragWhileCapturing(from: start, dy: -150, name: "16-zoom-scrub-in")
+        settle()
+        snap("17-zoom-after-scrub")
+        dragWhileCapturing(from: start, dy: 170, name: "18-zoom-force-selfie")
+        settle()
+        snap("19-selfie")
+    }
+
+    private func dragWhileCapturing(from start: XCUICoordinate, dy: CGFloat, name: String) {
+        let shots = Screens()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1.6) {
+            shots.image = XCUIScreen.main.screenshot()
+        }
+        start.press(forDuration: 0.4,
+                    thenDragTo: start.withOffset(CGVector(dx: 0, dy: dy)),
+                    withVelocity: .slow,
+                    thenHoldForDuration: 1.6)
+        if let image = shots.image {
+            let attachment = XCTAttachment(screenshot: image)
+            attachment.name = name
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+    }
+
+    private final class Screens: @unchecked Sendable {
+        var image: XCUIScreenshot?
     }
 
     // MARK: - Helpers

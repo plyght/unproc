@@ -160,7 +160,10 @@ final class CameraController {
     /// Switching between lenses of the same physical camera (e.g. 1× ↔ 2× crop)
     /// only changes the zoom; other switches reconfigure the session.
     func select(_ lens: Lens) async {
-        guard let target = lenses.first(where: { $0.id == lens.id }) ?? (lenses.isEmpty ? lens : nil) else { return }
+        // Known lenses, or a continuous-zoom crop of a known physical camera.
+        let known = lenses.first(where: { $0.id == lens.id })
+        let zoomCrop = lenses.contains(where: { $0.deviceID == lens.deviceID && $0.position == lens.position }) ? lens : nil
+        guard let target = known ?? zoomCrop ?? (lenses.isEmpty ? lens : nil) else { return }
         stopTrackingState()
         focus.point = nil
         if let demo {
@@ -177,6 +180,59 @@ final class CameraController {
         case .failed:
             break
         }
+    }
+
+    // MARK: - Continuous zoom
+
+    @ObservationIgnored private var pendingZoom: CGFloat?
+    @ObservationIgnored private var isApplyingZoom = false
+
+    /// Zoom factors (relative to the main wide) of the back lenses, ascending,
+    /// crops included — the detents of the zoom scrubber.
+    var zoomStops: [CGFloat] {
+        Array(Set(lenses.filter { !$0.isFront }.map(\.zoom))).sorted()
+    }
+
+    /// Continuous zoom across the back cameras. Picks the longest physical lens
+    /// at or below `zoom` and crops it digitally (the preview via
+    /// `videoZoomFactor`, the photo via `Lens.crop` in development). Exact stops
+    /// resolve to the real lens. Safe to call every frame of a drag: calls are
+    /// coalesced and only the latest value is applied.
+    func setZoom(_ zoom: CGFloat) {
+        pendingZoom = zoom
+        guard !isApplyingZoom else { return }
+        isApplyingZoom = true
+        Task {
+            while let next = pendingZoom {
+                pendingZoom = nil
+                if let lens = lensForZoom(next), lens.id != currentLens?.id {
+                    await select(lens)
+                }
+            }
+            isApplyingZoom = false
+        }
+    }
+
+    private func lensForZoom(_ zoom: CGFloat) -> Lens? {
+        let back = lenses.filter { !$0.isFront }
+        guard !back.isEmpty else { return nil }
+        let stops = zoomStops
+        let clamped = min(max(zoom, stops.first ?? zoom), stops.last ?? zoom)
+        // An exact (±1 %) stop is the real lens, crop lenses included.
+        if let exact = back.first(where: { abs($0.zoom - clamped) / $0.zoom < 0.01 }) {
+            return exact
+        }
+        let physical = back.filter { $0.crop <= 1.0001 }.sorted { $0.zoom < $1.zoom }
+        guard let base = physical.last(where: { $0.zoom <= clamped }) ?? physical.first else { return nil }
+        let crop = max(clamped / base.zoom, 1)
+        return Lens(
+            id: String(format: "%@@%.2f", base.id, clamped),
+            deviceID: base.deviceID,
+            position: base.position,
+            kind: base.kind,
+            crop: crop,
+            zoom: clamped
+        )
     }
 
     func setRawFlavor(_ flavor: RawFlavor) async {

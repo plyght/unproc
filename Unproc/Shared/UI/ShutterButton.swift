@@ -19,9 +19,7 @@ struct ShutterButton: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
                 .frame(width: width, height: height)
-                .background {
-                    Capsule().fill(Theme.accent)
-                }
+                .glassEffect(.regular.tint(Theme.accent).interactive(), in: .capsule)
                 .contentShape(Capsule())
         }
         .buttonStyle(PressableStyle(scale: 0.94, haptic: true))

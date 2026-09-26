@@ -1,42 +1,84 @@
 import SwiftUI
 
-/// Bottom-right lens label. Tap cycles lenses, long-press opens `LensPicker`.
+/// Bottom-right glass lens button.
 ///
-/// Built from tap + long-press gestures (not a `Button`) so a long press
-/// never also fires the tap action on release; press feedback comes from
-/// `onPressingChanged`, so it still responds on touch-down.
+/// - Tap: next lens.
+/// - Press and hold (or start dragging): the zoom track rises out of it;
+///   drag up to zoom in, down to zoom out, and keep forcing past the end to
+///   flip to the selfie camera.
+///
+/// One `DragGesture(minimumDistance: 0)` drives all three so a hold never
+/// also fires a tap and the drag continues seamlessly from the press.
 struct LensButton: View {
     let current: Lens?
+    /// Shown instead of the lens label while scrubbing (e.g. "2.4×").
+    var liveLabel: String? = nil
     let onTap: () -> Void
-    let onLongPress: () -> Void
+    let onScrubBegin: () -> Void
+    let onScrubChange: (CGFloat) -> Void
+    let onScrubEnd: () -> Void
 
     @State private var isPressed = false
+    @State private var isScrubbing = false
+    @State private var holdTask: Task<Void, Never>?
 
-    init(current: Lens?, onTap: @escaping () -> Void, onLongPress: @escaping () -> Void) {
-        self.current = current
-        self.onTap = onTap
-        self.onLongPress = onLongPress
-    }
+    private static let holdDelay: Duration = .milliseconds(260)
+    private static let dragToScrub: CGFloat = 8
 
     var body: some View {
-        Text(current?.buttonLabel ?? "—")
-            .monoLabel(current?.isFront == true ? 11 : 14, weight: .semibold)
+        Text(liveLabel ?? current?.buttonLabel ?? "—")
+            .monoLabel(current?.isFront == true && liveLabel == nil ? 11 : 14, weight: .semibold, uppercase: liveLabel == nil)
             .monospacedDigit()
             .contentTransition(.numericText())
             .animation(Theme.snappy, value: current?.id)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .glassEffect(.regular.interactive(), in: .circle)
+            .glassEffect(isScrubbing ? .regular.tint(Theme.accent.opacity(0.22)).interactive() : .regular.interactive(),
+                         in: .circle)
             .contentShape(Circle())
-            .scaleEffect(isPressed ? 0.96 : 1)
+            .scaleEffect(isPressed ? 0.94 : 1)
             .animation(Theme.press, value: isPressed)
-            .onTapGesture(perform: onTap)
-            .onLongPressGesture(minimumDuration: 0.35, perform: onLongPress, onPressingChanged: { pressing in
-                isPressed = pressing
-            })
+            .gesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                    .onChanged { value in
+                        if !isPressed {
+                            isPressed = true
+                            holdTask?.cancel()
+                            holdTask = Task { @MainActor in
+                                try? await Task.sleep(for: Self.holdDelay)
+                                guard !Task.isCancelled, isPressed, !isScrubbing else { return }
+                                beginScrub()
+                            }
+                        }
+                        if !isScrubbing, abs(value.translation.height) > Self.dragToScrub {
+                            beginScrub()
+                        }
+                        if isScrubbing {
+                            onScrubChange(value.translation.height)
+                        }
+                    }
+                    .onEnded { _ in
+                        holdTask?.cancel()
+                        holdTask = nil
+                        isPressed = false
+                        if isScrubbing {
+                            isScrubbing = false
+                            onScrubEnd()
+                        } else {
+                            onTap()
+                        }
+                    }
+            )
+            .sensoryFeedback(.impact(weight: .light), trigger: isScrubbing) { _, new in new }
             .accessibilityAddTraits(.isButton)
             .accessibilityLabel("Lens \(current?.buttonLabel ?? "")")
-            .accessibilityAction(named: "Choose lens", onLongPress)
+            .accessibilityHint("Hold and drag up or down to zoom")
             .accessibilityIdentifier("lensButton")
+    }
+
+    private func beginScrub() {
+        guard !isScrubbing else { return }
+        isScrubbing = true
+        onScrubBegin()
     }
 }
 

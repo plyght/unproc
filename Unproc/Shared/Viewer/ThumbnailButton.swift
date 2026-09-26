@@ -47,7 +47,6 @@ struct ThumbnailButton: View {
             }
         } label: {
             ZStack {
-                shape.fill(ViewerStyle.placeholder)
                 if !heroHidden, let shown, latest != nil {
                     Color.clear
                         .overlay {
@@ -64,7 +63,9 @@ struct ThumbnailButton: View {
                 }
             }
             .frame(width: size, height: size)
-            .overlay(shape.strokeBorder(Color.white.opacity(0.28), lineWidth: 1))
+            // Liquid Glass rim around the photo (and the empty state).
+            .padding(3)
+            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: corner + 3, style: .continuous))
             .contentShape(shape)
         }
         .buttonStyle(ViewerPressStyle())

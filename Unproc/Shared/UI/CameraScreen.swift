@@ -14,6 +14,7 @@ struct CameraScreen: View {
     @State private var showViewer = false
     @State private var showSettings = false
     @State private var showLensPicker = false
+    @State private var zoomScrub = ZoomScrubModel()
     @State private var proExpanded: ProControls.ProParameter?
     @State private var lookToast: Look?
     @State private var lookToastTick = 0
@@ -136,21 +137,19 @@ struct CameraScreen: View {
                         .zIndex(2)
                 }
 
-                if showLensPicker {
-                    LensPicker(lenses: camera.lenses, current: camera.currentLens) { lens in
-                        select(lens)
-                        // Let the glass selection slide over before the picker folds away.
-                        Task {
-                            try? await Task.sleep(for: .milliseconds(280))
-                            closeFloating()
-                        }
-                    }
-                    .frame(height: LensPicker.height)
-                    .frame(maxWidth: .infinity)
-                    .padding(.horizontal, Metrics.gutter)
-                    .padding(.top, max(m.shutterTop - 16 - LensPicker.height, 0))
-                    .transition(Theme.popover(anchor: .bottom, offsetY: 8, reduceMotion: reduceMotion))
-                    .zIndex(2)
+                if zoomScrub.isActive {
+                    // Rises out of the lens button; its centre lines up with the button's.
+                    let buttonTop = m.barTop + (m.barHeight - Metrics.sideItem) / 2
+                    ZoomTrack(model: zoomScrub)
+                        .padding(.trailing, m.barInset + Metrics.sideItem / 2 - ZoomTrack.width / 2)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .frame(height: max(buttonTop - 10, 0), alignment: .bottom)
+                        .transition(Theme.transition(
+                            .scale(scale: 0.6, anchor: .bottomTrailing).combined(with: .opacity),
+                            reduceMotion: reduceMotion
+                        ))
+                        .allowsHitTesting(false)
+                        .zIndex(3)
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
@@ -173,6 +172,9 @@ struct CameraScreen: View {
         }
         .animation(Theme.snappy, value: showSettings)
         .animation(Theme.snappy, value: showLensPicker)
+        .animation(Theme.snappy, value: zoomScrub.isActive)
+        .sensoryFeedback(.selection, trigger: zoomScrub.detentTick)
+        .sensoryFeedback(.impact(weight: .heavy, intensity: 1), trigger: zoomScrub.flipTick)
         .animation(Theme.snappy, value: settings.value.proMode)
         .animation(Theme.snappy, value: settings.value.ratio)
         .animation(Theme.fade, value: longExposureStart)
@@ -428,11 +430,19 @@ struct CameraScreen: View {
 
             LensButton(
                 current: camera.currentLens,
+                liveLabel: zoomScrub.isActive && !zoomScrub.isFront ? ZoomTrack.label(zoomScrub.zoom, precise: true) : nil,
                 onTap: { cycleLens() },
-                onLongPress: {
-                    guard camera.lenses.count > 1 else { return }
-                    showSettings = false
-                    showLensPicker = true
+                onScrubBegin: {
+                    closeFloating()
+                    let lens = camera.currentLens
+                    withAnimation(Theme.snappy) {
+                        zoomScrub.begin(stops: camera.zoomStops, zoom: lens?.zoom ?? 1, isFront: lens?.isFront == true)
+                    }
+                },
+                onScrubChange: { dy in perform(zoomScrub.update(dy: dy)) },
+                onScrubEnd: {
+                    let action = zoomScrub.end()
+                    withAnimation(Theme.exit) { perform(action) }
                 }
             )
             .frame(width: Metrics.sideItem, height: Metrics.sideItem)
@@ -456,11 +466,30 @@ struct CameraScreen: View {
         if showLensPicker { showLensPicker = false }
     }
 
+    private func perform(_ action: ZoomScrubModel.Action?) {
+        switch action {
+        case .zoom(let zoom)?:
+            camera.setZoom(zoom)
+        case .flip(.front)?:
+            if let front = camera.lenses.first(where: \.isFront) { select(front) }
+        case .flip(.back)?:
+            let back = camera.lenses.first { $0.id == "back.wide" } ?? camera.lenses.first { !$0.isFront }
+            if let back { select(back) }
+        case nil:
+            break
+        }
+    }
+
     private func cycleLens() {
         let lenses = camera.lenses
         guard lenses.count > 1 else { return }
-        let index = lenses.firstIndex { $0.id == camera.currentLens?.id } ?? -1
-        select(lenses[(index + 1) % lenses.count])
+        if let index = lenses.firstIndex(where: { $0.id == camera.currentLens?.id }) {
+            select(lenses[(index + 1) % lenses.count])
+        } else {
+            // Between stops after a scrub: go to the next real lens up.
+            let zoom = camera.currentLens?.zoom ?? 1
+            select(lenses.first { !$0.isFront && $0.zoom > zoom + 0.01 } ?? lenses[0])
+        }
     }
 
     private func select(_ lens: Lens) {
