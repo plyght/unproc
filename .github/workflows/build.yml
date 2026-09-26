@@ -1,0 +1,213 @@
+name: build
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Newest Xcode on the runner (Xcode 27 when present: iPhone 18 Pro SDK).
+  XCODE_GLOB: /Applications/Xcode_2[6-9]*.app
+
+jobs:
+  build:
+    name: Build unsigned IPA
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        run: |
+          XCODE="$(ls -d $XCODE_GLOB | grep -v -i beta | sort -V | tail -1)"
+          echo "Using $XCODE"
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i ios
+
+      - name: SDK capture API probe
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          H="$SDK/System/Library/Frameworks/AVFoundation.framework/Headers"
+          echo "::group::aperture"
+          grep -n -i "aperture" "$H"/AVCaptureDevice.h "$H"/AVCapturePhotoOutput.h "$H"/AVCaptureControl*.h 2>/dev/null | head -80 || true
+          echo "::endgroup::"
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Unproc.xcodeproj \
+            -scheme Unproc \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build | xcbeautify
+
+      - name: Package unsigned IPA
+        run: |
+          APP=build/Build/Products/Release-iphoneos/Unproc.app
+          test -d "$APP/Extensions/UnprocCapture.appex" || { echo "capture extension not embedded"; exit 1; }
+          test -d "$APP/PlugIns/UnprocWidgets.appex" || { echo "widget extension not embedded"; exit 1; }
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry unproc-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unproc-unsigned-ipa
+          path: unproc-unsigned.ipa
+          if-no-files-found: error
+
+  screenshots:
+    name: Simulator screenshots
+    runs-on: macos-26
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        run: |
+          XCODE="$(ls -d $XCODE_GLOB | grep -v -i beta | sort -V | tail -1)"
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Boot a Pro simulator
+        id: sim
+        run: |
+          # Prefer the newest "iPhone NN Pro" (18 Pro when the runtime has it).
+          UDID="$(xcrun simctl list devices available -j | python3 -c '
+          import json, re, sys
+          data = json.load(sys.stdin)["devices"]
+          best = None
+          for runtime, devices in data.items():
+              if "iOS" not in runtime:
+                  continue
+              rv = tuple(int(x) for x in re.findall(r"\d+", runtime.split("iOS")[-1])[:2])
+              for d in devices:
+                  m = re.fullmatch(r"iPhone (\d+) Pro", d["name"])
+                  if m:
+                      key = (int(m.group(1)), rv)
+                      if best is None or key > best[0]:
+                          best = (key, d["udid"], d["name"], runtime)
+          if best is None:
+              for runtime, devices in data.items():
+                  for d in devices:
+                      if d["name"].startswith("iPhone") and "iOS" in runtime:
+                          best = ((0, (0,)), d["udid"], d["name"], runtime)
+          print(best[1]); print(best[2] + " / " + best[3], file=sys.stderr)
+          ')"
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl status_bar "$UDID" override --time "9:41" --batteryState charged --batteryLevel 100 --cellularBars 4 --wifiBars 3
+          xcrun simctl privacy "$UDID" grant photos lol.peril.unproc || true
+          xcrun simctl privacy "$UDID" grant camera lol.peril.unproc || true
+
+      - name: Run screenshot tour
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project Unproc.xcodeproj \
+            -scheme Unproc \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            -derivedDataPath build \
+            -resultBundlePath shots.xcresult \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcbeautify || echo "::warning::UI tour reported failures; exporting whatever was captured"
+
+      - name: Export screenshots
+        run: |
+          mkdir -p raw screenshots
+          xcrun xcresulttool export attachments --path shots.xcresult --output-path raw
+          python3 - <<'PY'
+          import json, os, shutil
+          manifest = json.load(open("raw/manifest.json"))
+          for test in manifest:
+              for a in test.get("attachments", []):
+                  name = a.get("suggestedHumanReadableName") or a["exportedFileName"]
+                  base = name.split("_")[0] if name[:2].isdigit() else name
+                  ext = os.path.splitext(a["exportedFileName"])[1] or ".png"
+                  if not base.endswith(ext):
+                      base += ext
+                  shutil.copy(os.path.join("raw", a["exportedFileName"]), os.path.join("screenshots", base))
+          PY
+          ls -la screenshots
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: screenshots
+          if-no-files-found: warn
+
+      - name: Publish to ci-screenshots branch
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: |
+          set -e
+          SHA="${GITHUB_SHA::7}"
+          mkdir -p /tmp/pub && cd /tmp/pub
+          git init -q -b ci-screenshots
+          git config user.name "github-actions[bot]"
+          git config user.email "41898299+github-actions[bot]@users.noreply.github.com"
+          cp "$GITHUB_WORKSPACE"/screenshots/* . 2>/dev/null || true
+          {
+            echo "# unproc screenshots"
+            echo
+            echo "From \`$SHA\` — $(date -u '+%Y-%m-%d %H:%M UTC') — simulator demo feed."
+            echo
+            for f in $(ls *.png 2>/dev/null | sort); do
+              echo "### ${f%.png}"
+              echo "<img src=\"$f\" width=\"320\">"
+              echo
+            done
+          } > README.md
+          git add -A
+          git commit -qm "Screenshots for $SHA"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ci-screenshots
+          {
+            echo "## Screenshots"
+            echo "Gallery: https://github.com/${{ github.repository }}/tree/ci-screenshots"
+            echo
+            ls *.png | sed 's/^/- /'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    name: Attach IPA to release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: unproc-unsigned-ipa
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: unproc-unsigned.ipa
+          generate_release_notes: true
