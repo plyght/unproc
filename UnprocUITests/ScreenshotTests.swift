@@ -150,6 +150,17 @@ final class ScreenshotTests: XCTestCase {
         dragWhileCapturing(from: start, dy: 110, name: "18-zoom-force-selfie", holdFirst: 0.05)
         settle()
         snap("19-selfie")
+
+        // 16:9: tap the lens button; the ruler must stop at the image's bottom edge.
+        if tapIfPresent("statusBadge") {
+            settle(0.5)
+            tapIfPresent("menu.ratio.16:9")
+            if !tapIfPresent("menu.dismiss") { tapIfPresent("statusBadge") }
+            settle()
+            tapIfPresent("lensButton")
+            settle(0.6)
+            snap("20-zoom-ruler-16x9")
+        }
     }
 
     private func dragWhileCapturing(from start: XCUICoordinate, dy: CGFloat, name: String, holdFirst: TimeInterval = 0.4) {
