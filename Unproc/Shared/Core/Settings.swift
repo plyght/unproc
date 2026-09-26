@@ -70,6 +70,11 @@ struct CaptureSettings: Codable, Equatable, Sendable {
     var ratio: FrameRatio = .fourThree
     var accent: AccentMode = .auto
 
+    // Spelled out (not synthesized) so helpers can name the type in signatures.
+    enum CodingKeys: String, CodingKey {
+        case output, rawFlavor, lookID, doubleExposure, proMode, zebras, peaking, lensID, ratio, accent
+    }
+
     init() {}
 
     // Tolerant decoding: settings saved by an older build (or pushed through
