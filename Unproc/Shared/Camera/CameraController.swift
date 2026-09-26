@@ -113,6 +113,24 @@ final class CameraController {
         }
     }
 
+    /// Demo mode (Simulator / `-UNPROC_DEMO`): fake lenses and exposure, frames
+    /// from `SimulatorCamera`; no capture session and no permission prompt.
+    private func startDemo(_ demo: SimulatorCamera, preferredLensID: String?) {
+        if lenses.isEmpty {
+            lenses = SimulatorCamera.lenses
+            exposure = SimulatorCamera.exposure
+            focus = SimulatorCamera.focus
+        }
+        guard let lens = resolveLens(preferredLensID) else {
+            status = .failed("No camera available")
+            return
+        }
+        currentLens = lens
+        demo.start(lens: lens)
+        hasStarted = true
+        status = .running
+    }
+
     private static func requestAuthorization() async -> Bool {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
