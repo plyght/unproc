@@ -5,8 +5,9 @@ import SwiftUI
 enum Theme {
     // MARK: Colour
 
-    /// Signal orange #FF5A1F — selected values and the shutter. Nothing else.
-    static let accent = Color(red: 1.0, green: 90.0 / 255.0, blue: 31.0 / 255.0)
+    /// The accent — selected values and the shutter. Nothing else. The phone's
+    /// own colour in AUTO, else signal orange #FF5A1F (see `DeviceAccent`).
+    static var accent: Color { DeviceAccent.color }
     static let background = Color.black
     static let primary = Color.white
     static let secondary = Color.white.opacity(0.5)

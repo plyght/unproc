@@ -42,6 +42,11 @@ struct SettingsMenu: View {
             toggleRow("PRO", id: "pro", isOn: value.proMode) { settings.value.proMode = $0 }
             toggleRow("ZEBRAS", id: "zebras", isOn: value.zebras) { settings.value.zebras = $0 }
             toggleRow("PEAKING", id: "peaking", isOn: value.peaking) { settings.value.peaking = $0 }
+
+            row("ACCENT", id: "accent", selected: value.accent.rawValue,
+                options: [("auto", "AUTO"), ("orange", "ORANGE")]) {
+                settings.value.accent = AccentMode(rawValue: $0) ?? .auto
+            }
         }
         .padding(.leading, 18)
         .padding(.trailing, 12)

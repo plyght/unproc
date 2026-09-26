@@ -39,6 +39,14 @@ enum FrameRatio: String, Codable, CaseIterable, Sendable {
     var portraitAspect: Double { 1 / longOverShort }
 }
 
+/// Where the accent colour comes from.
+enum AccentMode: String, Codable, CaseIterable, Sendable {
+    /// The phone's own finish, when iOS will tell us (falls back to orange).
+    case auto
+    /// unproc's signal orange.
+    case orange
+}
+
 /// Everything the user can change. Codable so it can be handed to the
 /// lock-screen extension through the capture intent's app context (≤ 4 KB).
 struct CaptureSettings: Codable, Equatable, Sendable {
@@ -52,6 +60,7 @@ struct CaptureSettings: Codable, Equatable, Sendable {
     /// `Lens.id` of the last lens used, restored on launch.
     var lensID: String? = nil
     var ratio: FrameRatio = .fourThree
+    var accent: AccentMode = .auto
 
     init() {}
 
@@ -69,6 +78,7 @@ struct CaptureSettings: Codable, Equatable, Sendable {
         peaking = (try? c.decodeIfPresent(Bool.self, forKey: .peaking)) ?? d.peaking
         lensID = (try? c.decodeIfPresent(String.self, forKey: .lensID)) ?? d.lensID
         ratio = (try? c.decodeIfPresent(FrameRatio.self, forKey: .ratio)) ?? d.ratio
+        accent = (try? c.decodeIfPresent(AccentMode.self, forKey: .accent)) ?? d.accent
     }
 }
 

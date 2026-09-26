@@ -5,8 +5,8 @@ import Observation
 /// Visual and motion constants for the viewer. Namespaced so they never
 /// collide with the camera UI's `Theme`.
 enum ViewerStyle {
-    /// Signal orange, #FF5A1F.
-    static let accent = Color(red: 1.0, green: 90.0 / 255.0, blue: 31.0 / 255.0)
+    /// The app accent (device colour or signal orange, see `DeviceAccent`).
+    static var accent: Color { DeviceAccent.color }
     static let placeholder = Color(white: 0.11)
     /// Shared `matchedGeometryEffect` id between the thumbnail and the viewer.
     static let heroID = "photo-hero"

@@ -142,6 +142,8 @@ struct CameraScreen: View {
 
             }
             .frame(width: geo.size.width, height: geo.size.height)
+            // The accent is read at draw time; rebuild the tree when it changes.
+            .id(settings.value.accent)
         }
         .background(Theme.background.ignoresSafeArea())
         .overlay {
@@ -207,6 +209,9 @@ struct CameraScreen: View {
         .onChange(of: settings.value.proMode) { _, pro in
             camera.proEnabled = pro
             if !pro { proExpanded = nil }
+        }
+        .onChange(of: settings.value.accent) { _, _ in
+            DeviceAccent.refresh()
         }
         .onChange(of: settings.value.doubleExposure) { _, on in
             if !on { shutter.cancelDoubleExposure() }

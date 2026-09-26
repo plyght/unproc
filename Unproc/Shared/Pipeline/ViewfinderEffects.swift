@@ -6,11 +6,8 @@ import Foundation
 /// cheap enough to run every preview frame in `Developer.shared.context`
 /// (linear extended Display P3 working space).
 enum ViewfinderEffects {
-    /// Peaking accent, #FF5A1F.
-    static let accent: CIColor =
-        CIColor(red: 1.0, green: 90.0 / 255.0, blue: 31.0 / 255.0,
-                colorSpace: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB())
-        ?? CIColor(red: 1.0, green: 90.0 / 255.0, blue: 31.0 / 255.0)
+    /// Peaking colour: the app accent (see `DeviceAccent`).
+    static var accent: CIColor { DeviceAccent.ciColor }
 
     // MARK: Gain
 
