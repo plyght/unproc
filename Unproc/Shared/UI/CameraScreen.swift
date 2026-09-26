@@ -46,9 +46,16 @@ struct CameraScreen: View {
         let barHeight: CGFloat
         let shutterWidth: CGFloat
         let shutterHeight: CGFloat
+        /// Side items (thumbnail, lens) are inset so their centres mirror each other.
+        let barInset: CGFloat
+        /// Top of the shutter pill, for placing popovers above it.
+        var shutterTop: CGFloat { barTop + (barHeight - shutterHeight) / 2 }
+
+        static let gutter: CGFloat = 10
+        static let sideItem: CGFloat = 52
 
         init(size: CGSize) {
-            let gutter: CGFloat = 8
+            let gutter = Self.gutter
             let minBar: CGFloat = 104
             vfTop = 4
             let byWidth = max(size.width - gutter * 2, 0)
@@ -61,6 +68,7 @@ struct CameraScreen: View {
             let compact = size.width < 380 || remaining < 150
             shutterWidth = compact ? 116 : 132
             shutterHeight = compact ? 56 : 64
+            barInset = gutter + 16
         }
     }
 
@@ -102,16 +110,15 @@ struct CameraScreen: View {
                 }
 
                 if showLensPicker {
-                    HStack {
-                        Spacer(minLength: 0)
-                        LensPicker(lenses: camera.lenses, current: camera.currentLens) { lens in
-                            select(lens)
-                            closeFloating()
-                        }
+                    LensPicker(lenses: camera.lenses, current: camera.currentLens) { lens in
+                        select(lens)
+                        closeFloating()
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.top, max(m.barTop + m.barHeight / 2 - 72, 0))
-                    .transition(Theme.popover(anchor: .bottomTrailing, offsetY: 8, reduceMotion: reduceMotion))
+                    .frame(height: LensPicker.height)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, Metrics.gutter)
+                    .padding(.top, max(m.shutterTop - 16 - LensPicker.height, 0))
+                    .transition(Theme.popover(anchor: .bottom, offsetY: 8, reduceMotion: reduceMotion))
                     .zIndex(2)
                 }
             }
@@ -236,9 +243,9 @@ struct CameraScreen: View {
                         .contentTransition(.opacity)
                 }
                 .animation(Theme.fade, value: look.id)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                .background(Color.black.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+                .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .allowsHitTesting(false)
                 .transition(Theme.blurFade)
             }
@@ -288,8 +295,8 @@ struct CameraScreen: View {
                         ))
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.bottom, 10)
+            .padding(.horizontal, 14)
+            .padding(.bottom, 14)
             .animation(Theme.snappy, value: shutter.lastError)
         }
         .animation(Theme.fade, value: lookToast == nil)
@@ -349,7 +356,7 @@ struct CameraScreen: View {
                 closeFloating()
                 withAnimation(Theme.snappy) { showViewer = true }
             }
-            .frame(width: 52, height: 52)
+            .frame(width: Metrics.sideItem, height: Metrics.sideItem)
             .frame(maxWidth: .infinity, alignment: .leading)
 
             ShutterButton(
@@ -389,9 +396,10 @@ struct CameraScreen: View {
                     showLensPicker = true
                 }
             )
+            .frame(width: Metrics.sideItem, height: Metrics.sideItem)
             .frame(maxWidth: .infinity, alignment: .trailing)
         }
-        .padding(.horizontal, 22)
+        .padding(.horizontal, m.barInset)
     }
 
     // MARK: - Actions

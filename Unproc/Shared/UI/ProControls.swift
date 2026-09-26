@@ -65,7 +65,7 @@ struct ProControls: View {
     }
 
     private var chipRow: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 6) {
             ForEach(parameters) { parameter in
                 chip(parameter)
             }
@@ -80,7 +80,7 @@ struct ProControls: View {
         return Button {
             expanded = selected ? nil : parameter
         } label: {
-            VStack(spacing: 1) {
+            VStack(spacing: 2) {
                 Text(parameter.title)
                     .monoLabel(7, color: selected ? Theme.accent : Theme.secondary)
                 Text(valueText(parameter))
@@ -93,8 +93,8 @@ struct ProControls: View {
                     // values change constantly and would just be noise.
                     .animation(manual ? Theme.snappy : nil, value: valueText(parameter))
             }
-            .frame(minWidth: 50, maxWidth: .infinity)
-            .padding(.vertical, 5)
+            .frame(minWidth: 48, maxWidth: .infinity)
+            .padding(.vertical, 7)
             .padding(.horizontal, 4)
             .contentShape(Capsule())
         }

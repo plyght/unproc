@@ -24,9 +24,11 @@ struct LensButton: View {
             .monospacedDigit()
             .contentTransition(.numericText())
             .animation(Theme.snappy, value: current?.id)
-            .frame(minWidth: 56, minHeight: 48)
-            .padding(.horizontal, 4)
-            .contentShape(Rectangle())
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background {
+                Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
+            }
+            .contentShape(Circle())
             .scaleEffect(isPressed ? 0.96 : 1)
             .animation(Theme.press, value: isPressed)
             .onTapGesture(perform: onTap)
@@ -43,6 +45,8 @@ struct LensButton: View {
 /// Small Liquid Glass capsule listing every lens. Presented scaling out of the
 /// lens button (see `CameraScreen`).
 struct LensPicker: View {
+    static let height: CGFloat = 44
+
     let lenses: [Lens]
     let current: Lens?
     let onSelect: (Lens) -> Void
@@ -58,8 +62,8 @@ struct LensPicker: View {
                         Text(lens.buttonLabel)
                             .monoLabel(lens.isFront ? 10 : 12, weight: .semibold,
                                        color: selected ? Theme.accent : Theme.primary)
-                            .frame(minWidth: 40, minHeight: 36)
-                            .padding(.horizontal, 4)
+                            .frame(minWidth: 44, minHeight: Self.height - 4)
+                            .padding(.horizontal, 2)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.pressable)

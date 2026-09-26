@@ -29,13 +29,13 @@ struct SettingsMenu: View {
         }
         .padding(.horizontal, 18)
         .padding(.top, 20)
-        .padding(.bottom, 16)
+        .padding(.bottom, 28)
         .frame(maxWidth: .infinity, alignment: .leading)
         .overlay(alignment: .bottom) {
             Capsule()
-                .fill(Color.white.opacity(0.3))
-                .frame(width: 32, height: 3)
-                .padding(.bottom, 6)
+                .fill(Color.white.opacity(0.28))
+                .frame(width: 36, height: 4)
+                .padding(.bottom, 10)
         }
         .background {
             UnevenRoundedRectangle(
@@ -71,7 +71,7 @@ struct SettingsMenu: View {
     private static let labelWidth: CGFloat = 96
 
     private func row<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 0) {
+        HStack(alignment: .center, spacing: 0) {
             Text(title)
                 .monoLabel(10, color: Theme.tertiary)
                 .lineLimit(1)
@@ -91,7 +91,7 @@ struct SettingsMenu: View {
     }
 
     private func lookRow(selectedID: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 0) {
+        HStack(alignment: .center, spacing: 0) {
             Text("LOOK")
                 .monoLabel(10, color: Theme.tertiary)
                 .frame(width: Self.labelWidth, alignment: .leading)
@@ -105,7 +105,14 @@ struct SettingsMenu: View {
                             .id(look.id)
                         }
                     }
-                    .padding(.trailing, 24)
+                    .padding(.trailing, 28)
+                }
+                .mask {
+                    HStack(spacing: 0) {
+                        Color.black
+                        LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
+                            .frame(width: 28)
+                    }
                 }
                 .onAppear {
                     proxy.scrollTo(selectedID, anchor: .center)
