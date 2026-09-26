@@ -105,6 +105,8 @@ final class SessionPhotoStore: PhotoStore {
             } catch {
                 Log.viewer.error("session store: delete failed \(url.lastPathComponent, privacy: .public): \(Log.describe(error), privacy: .public)")
                 if firstError == nil { firstError = error }
+                // Keep the RAW if its JPEG couldn't be removed.
+                continue
             }
             let base = url.deletingPathExtension()
             for ext in ["dng", "DNG"] {

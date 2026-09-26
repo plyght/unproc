@@ -169,7 +169,8 @@ enum CaptureControlsInstaller {
     /// 6 steps per stop gap, evenly spaced in log zoom, rounded to 0.1×
     /// (0.05× below 1×) and de-duplicated; stops are always exact.
     static func zoomValues(stops: [Float]) -> [Float] {
-        let stops = stops.sorted()
+        // Positive, finite, unique — duplicates would make AVCaptureSlider(values:) raise.
+        let stops = Array(Set(stops.filter { $0.isFinite && $0 > 0 })).sorted()
         guard stops.count > 1 else { return stops }
         var values: [Float] = []
         for i in 0..<(stops.count - 1) {

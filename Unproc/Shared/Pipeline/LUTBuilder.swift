@@ -19,7 +19,7 @@ enum GradeKit {
     }
 
     @inline(__always)
-    static func clamp01(_ x: Float) -> Float { min(max(x, 0), 1) }
+    static func clamp01(_ x: Float) -> Float { x.isNaN ? 0 : min(max(x, 0), 1) }
 
     @inline(__always)
     static func clamp01(_ c: GradeRGB) -> GradeRGB { GradeRGB(clamp01(c.x), clamp01(c.y), clamp01(c.z)) }
