@@ -1,6 +1,7 @@
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import Foundation
+import Synchronization
 
 /// The catalogue of Looks and the code that applies them.
 ///
@@ -61,24 +62,27 @@ enum LookLibrary {
 }
 
 /// Thread-safe, build-once store of cube data.
-private final class LUTCache: @unchecked Sendable {
-    private let lock = NSLock()
-    private var cubes: [String: Data] = [:]
-    private var missing: Set<String> = []
+private final class LUTCache: Sendable {
+    private struct State {
+        var cubes: [String: Data] = [:]
+        var missing: Set<String> = []
+    }
+
+    private let state = Mutex(State())
 
     func data(for id: String) -> Data? {
-        lock.lock()
-        defer { lock.unlock() }
-        if let d = cubes[id] { return d }
-        if missing.contains(id) { return nil }
-        guard let transform = LookRecipes.transform(for: id) else {
-            missing.insert(id)
-            return nil
+        state.withLock { cache -> Data? in
+            if let d = cache.cubes[id] { return d }
+            if cache.missing.contains(id) { return nil }
+            guard let transform = LookRecipes.transform(for: id) else {
+                cache.missing.insert(id)
+                return nil
+            }
+            // Building takes a few ms. Holding the lock means concurrent callers
+            // wait for the single build instead of duplicating it.
+            let d = LUTBuilder.cube(dimension: LookLibrary.dimension, transform)
+            cache.cubes[id] = d
+            return d
         }
-        // Building takes a few ms; holding the lock means concurrent callers
-        // wait for the single build instead of duplicating it.
-        let d = LUTBuilder.cube(dimension: LookLibrary.dimension, transform)
-        cubes[id] = d
-        return d
     }
 }

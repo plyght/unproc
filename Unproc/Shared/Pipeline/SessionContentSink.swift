@@ -14,10 +14,10 @@ final class SessionContentSink: CaptureSink {
     }
 
     func save(_ photo: DevelopedPhoto) async throws -> PhotoItem.ID {
-        let root = self.root
-        return try await Task.detached(priority: .userInitiated) {
-            try Self.write(photo, into: root)
-        }.value
+        // A nonisolated async method on a non-actor class runs on the global
+        // concurrent executor in Swift 5 mode, so this file I/O is already off
+        // the main actor. No extra task is needed.
+        try Self.write(photo, into: root)
     }
 
     private static func write(_ photo: DevelopedPhoto, into root: URL) throws -> PhotoItem.ID {

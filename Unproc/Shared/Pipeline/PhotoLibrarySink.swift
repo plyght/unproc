@@ -1,6 +1,7 @@
 #if UNPROC_APP
 import Foundation
 import Photos
+import Synchronization
 import UniformTypeIdentifiers
 
 /// App sink: one Photos asset per shot — the graded JPEG as the photo and,
@@ -65,10 +66,9 @@ final class PhotoLibrarySink: CaptureSink {
 }
 
 /// Carries the placeholder id out of the (possibly `@Sendable`) change block.
-private final class IdentifierBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value: String?
-    func set(_ v: String?) { lock.lock(); value = v; lock.unlock() }
-    func get() -> String? { lock.lock(); defer { lock.unlock() }; return value }
+private final class IdentifierBox: Sendable {
+    private let value = Mutex<String?>(nil)
+    func set(_ v: String?) { value.withLock { $0 = v } }
+    func get() -> String? { value.withLock { $0 } }
 }
 #endif
