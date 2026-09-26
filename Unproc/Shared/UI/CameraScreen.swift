@@ -1,5 +1,6 @@
 import SwiftUI
 import AVKit
+import GlurBackdrop
 
 /// The whole camera: viewfinder, status badge, settings menu, PRO controls,
 /// bottom bar (thumbnail · shutter · lens) and the photo viewer on top.
@@ -15,6 +16,8 @@ struct CameraScreen: View {
     @State private var showSettings = false
     @State private var showLensPicker = false
     @State private var zoomScrub = ZoomScrubModel()
+    @State private var zoomDialVisible = false
+    @State private var zoomHideTask: Task<Void, Never>?
     @State private var proExpanded: ProControls.ProParameter?
     @State private var lookToast: Look?
     @State private var lookToastTick = 0
@@ -137,19 +140,23 @@ struct CameraScreen: View {
                         .zIndex(2)
                 }
 
-                if zoomScrub.isActive {
-                    // Rises out of the lens button; its centre lines up with the button's.
-                    let buttonTop = m.barTop + (m.barHeight - Metrics.sideItem) / 2
-                    ZoomTrack(model: zoomScrub)
-                        .padding(.trailing, m.barInset + Metrics.sideItem / 2 - ZoomTrack.width / 2)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                        .frame(height: max(buttonTop - 10, 0), alignment: .bottom)
-                        .transition(Theme.transition(
-                            .scale(scale: 0.6, anchor: .bottomTrailing).combined(with: .opacity),
-                            reduceMotion: reduceMotion
-                        ))
-                        .allowsHitTesting(false)
-                        .zIndex(3)
+                if zoomDialVisible {
+                    // In the black band between the viewfinder and the shutter; when a
+                    // tall ratio leaves no band, it floats (glass) just above the shutter.
+                    let gapTop = m.vfTop + m.vfHeight
+                    let band = m.shutterTop - gapTop
+                    let centreY = band >= ZoomDial.height + 12
+                        ? gapTop + band / 2
+                        : m.shutterTop - ZoomDial.height / 2 - 12
+                    ZoomDial(model: zoomScrub, width: m.vfWidth - 8) { dx in
+                        dialDrag(dx)
+                    }
+                    .position(x: geo.size.width / 2, y: centreY)
+                    .transition(Theme.transition(
+                        .scale(scale: 0.92, anchor: .trailing).combined(with: .opacity),
+                        reduceMotion: reduceMotion
+                    ))
+                    .zIndex(3)
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
@@ -172,7 +179,7 @@ struct CameraScreen: View {
         }
         .animation(Theme.snappy, value: showSettings)
         .animation(Theme.snappy, value: showLensPicker)
-        .animation(Theme.snappy, value: zoomScrub.isActive)
+        .animation(Theme.snappy, value: zoomDialVisible)
         .modifier(CameraHaptics(
             zoomScrub: zoomScrub,
             lookID: settings.value.lookID,
@@ -273,6 +280,25 @@ struct CameraScreen: View {
                         )
                     }
                     .allowsHitTesting(false)
+            }
+
+            if value.ratio == .sixteenNine {
+                // Tall frame: soften the top and bottom edges so the frame melts into
+                // the black and the floating controls sit on calm image. Progressive
+                // (Glur backdrop) blur plus a gentle darkening, both on smooth ramps.
+                GlurView(radius: 10, mask: .linear(stops: [
+                    .init(intensity: 1, location: 0),
+                    .init(intensity: 0, location: 0.13),
+                    .init(intensity: 0, location: 0.80),
+                    .init(intensity: 1, location: 1),
+                ], startPoint: .top, endPoint: .bottom))
+                LinearGradient(stops: [
+                    .init(color: .black.opacity(0.42), location: 0),
+                    .init(color: .black.opacity(0), location: 0.12),
+                    .init(color: .black.opacity(0), location: 0.78),
+                    .init(color: .black.opacity(0.5), location: 1),
+                ], startPoint: .top, endPoint: .bottom)
+                .allowsHitTesting(false)
             }
 
             Color.black
@@ -437,20 +463,14 @@ struct CameraScreen: View {
 
             LensButton(
                 current: camera.currentLens,
-                liveLabel: zoomScrub.isActive && !zoomScrub.isFront ? ZoomTrack.label(zoomScrub.zoom, precise: true) : nil,
+                liveLabel: zoomDialVisible && !zoomScrub.isFront ? ZoomDial.label(zoomScrub.zoom, precise: true) : nil,
                 onTap: { cycleLens() },
                 onScrubBegin: {
                     closeFloating()
-                    let lens = camera.currentLens
-                    withAnimation(Theme.snappy) {
-                        zoomScrub.begin(stops: camera.zoomStops, zoom: lens?.zoom ?? 1, isFront: lens?.isFront == true)
-                    }
+                    beginZoomScrub()
                 },
-                onScrubChange: { dy in perform(zoomScrub.update(dy: dy)) },
-                onScrubEnd: {
-                    let action = zoomScrub.end()
-                    withAnimation(Theme.exit) { perform(action) }
-                }
+                onScrubChange: { dx in perform(zoomScrub.update(dy: dx)) },
+                onScrubEnd: { endZoomScrub() }
             )
             .frame(width: Metrics.sideItem, height: Metrics.sideItem)
             .frame(maxWidth: .infinity, alignment: .trailing)
@@ -471,6 +491,37 @@ struct CameraScreen: View {
     private func closeFloating() {
         if showSettings { showSettings = false }
         if showLensPicker { showLensPicker = false }
+    }
+
+    private func beginZoomScrub() {
+        zoomHideTask?.cancel()
+        let lens = camera.currentLens
+        zoomScrub.begin(stops: camera.zoomStops, zoom: lens?.zoom ?? 1, isFront: lens?.isFront == true)
+        if !zoomDialVisible {
+            withAnimation(Theme.snappy) { zoomDialVisible = true }
+        }
+    }
+
+    private func endZoomScrub() {
+        let action = zoomScrub.end()
+        withAnimation(Theme.exit) { perform(action) }
+        // Linger so the dial can be grabbed again, then fold away.
+        zoomHideTask?.cancel()
+        zoomHideTask = Task {
+            try? await Task.sleep(for: .milliseconds(1600))
+            guard !Task.isCancelled else { return }
+            withAnimation(Theme.exit) { zoomDialVisible = false }
+        }
+    }
+
+    /// Drags on the dial itself (after it's shown).
+    private func dialDrag(_ dx: CGFloat?) {
+        guard let dx else {
+            endZoomScrub()
+            return
+        }
+        if !zoomScrub.isActive { beginZoomScrub() }
+        perform(zoomScrub.update(dy: dx))
     }
 
     private func perform(_ action: ZoomScrubModel.Action?) {

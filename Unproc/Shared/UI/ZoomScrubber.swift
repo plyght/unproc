@@ -1,9 +1,8 @@
 import SwiftUI
 
-/// State + math for the vertical zoom scrubber that rises out of the lens
-/// button on press-and-hold.
+/// State + math for the zoom dial that appears when the lens button is held.
 ///
-/// The track is laid out in points, bottom (0) to top (`length`): each lens
+/// The scale is laid out in points, from 0 (widest) to `length` (longest): each lens
 /// stop owns a short flat "detent" band where zoom holds still (so stops feel
 /// magnetic), and the ramps between stops are log-linear in zoom. Dragging
 /// past either end runs into rubber-band resistance; pull far enough past the
@@ -215,84 +214,112 @@ final class ZoomScrubModel {
     }
 }
 
-/// The glass track itself: stop labels, a thumb, the live zoom readout, and an
-/// elastic end that stretches as you force it toward a camera flip.
-struct ZoomTrack: View {
+/// Inline horizontal zoom dial (same family as the PRO dials), shown in the
+/// black band between the viewfinder and the shutter. The scale slides under a
+/// fixed accent indicator: drag left to zoom in, right to zoom out. Lens stops
+/// are labelled major ticks; forcing past .5× reveals "SELFIE" in the space the
+/// scale stretches away from, and flips when pulled far enough.
+struct ZoomDial: View {
     let model: ZoomScrubModel
-    static let width: CGFloat = 46
-    private static let inset: CGFloat = 14
+    let width: CGFloat
+    /// Called with the horizontal drag translation; nil on end.
+    let onDrag: (CGFloat?) -> Void
+
+    static let height: CGFloat = 50
 
     var body: some View {
-        let length = model.length
-        let below = max(-model.stretch, 0)
-        let above = max(model.stretch, 0)
-        let trackHeight = model.isFront ? 44 : length + Self.inset * 2
+        ZStack {
+            Canvas { context, size in
+                draw(in: &context, size: size)
+            }
+            .mask {
+                LinearGradient(stops: [
+                    .init(color: .clear, location: 0),
+                    .init(color: .black, location: 0.14),
+                    .init(color: .black, location: 0.86),
+                    .init(color: .clear, location: 1),
+                ], startPoint: .leading, endPoint: .trailing)
+            }
 
-        GlassEffectContainer(spacing: 10) {
-            ZStack(alignment: .bottom) {
-                // Stop labels.
-                if !model.isFront {
-                    ForEach(Array(model.stops.enumerated()), id: \.offset) { index, stop in
-                        let active = abs(stop - model.zoom) / stop < 0.01
-                        Text(ZoomTrack.label(stop))
-                            .monoLabel(9, weight: active ? .bold : .medium,
-                                       color: active ? Theme.accent : Theme.secondary, uppercase: false)
-                            .fixedSize()
-                            .offset(y: -(model.position(ofStop: index) + Self.inset - 6))
-                    }
-                    // Thumb.
-                    // Thumb: a short accent tick on the trailing edge.
-                    Capsule()
-                        .fill(Theme.accent)
-                        .frame(width: 7, height: 3)
-                        .offset(x: Self.width / 2 - 7, y: -(model.position + Self.inset - 1.5))
-                } else {
-                    Image(systemName: "arrow.triangle.2.circlepath.camera")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(model.flipProgress >= 1 ? Theme.accent : Theme.primary)
-                        .padding(.bottom, 13)
-                }
-            }
-            .frame(width: Self.width, height: trackHeight + below + above, alignment: .bottom)
-            .glassEffect(.regular.tint(Color.black.opacity(0.2)).interactive(), in: .capsule)
-            // The elastic end: the capsule grows past its end as it's forced.
-            .offset(y: below)
-            .overlay(alignment: .topTrailing) {
-                if !model.isFront {
-                    // Frame top is fixed; the capsule is drawn `below` lower.
-                    readout
-                        .offset(x: -(Self.width + 8),
-                                y: trackHeight + 2 * below + above - model.position - Self.inset - 13)
-                }
-            }
-            .overlay(alignment: model.isFront ? .topTrailing : .bottomTrailing) {
-                flipHint
-                    .offset(x: -(Self.width + 8), y: model.isFront ? 6 : below - 8)
-            }
+            // Fixed centre indicator.
+            Capsule()
+                .fill(Theme.accent)
+                .frame(width: 2, height: 22)
+                .offset(y: 4)
+
+            Text(model.isFront ? "SELFIE" : ZoomDial.label(model.zoom, precise: true))
+                .monoLabel(10, weight: .bold, color: Theme.accent, uppercase: model.isFront)
+                .monospacedDigit()
+                .contentTransition(.numericText())
+                .offset(y: -15)
+
+            flipHint
         }
+        .frame(width: width, height: Self.height)
+        .glassEffect(.regular.tint(Color.black.opacity(0.25)).interactive(), in: .capsule)
+        .contentShape(Capsule())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { onDrag($0.translation.width) }
+                .onEnded { _ in onDrag(nil) }
+        )
         .animation(.interactiveSpring(response: 0.22, dampingFraction: 0.86), value: model.stretch)
+        .accessibilityIdentifier("zoomDial")
     }
 
-    private var readout: some View {
-        Text(ZoomTrack.label(model.zoom, precise: true))
-            .monoLabel(12, weight: .semibold, uppercase: false)
-            .monospacedDigit()
-            .contentTransition(.numericText())
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .glassEffect(.regular.tint(Color.black.opacity(0.2)), in: .capsule)
-            .fixedSize()
+    // MARK: Drawing
+
+    private func x(for trackPosition: CGFloat, centre: CGFloat) -> CGFloat {
+        // Scale moves opposite the finger; stretch lets it drift past its ends.
+        centre + (trackPosition - model.position) - model.stretch
+    }
+
+    private func draw(in context: inout GraphicsContext, size: CGSize) {
+        guard !model.isFront else { return }
+        let centre = size.width / 2
+        let stops = model.stops
+        let baseline = size.height - 12
+
+        // Minor ticks: 8 per gap between stops, evenly spaced in log zoom.
+        for i in 0..<max(stops.count - 1, 0) {
+            for step in 1..<8 {
+                let z = stops[i] * pow(stops[i + 1] / stops[i], CGFloat(step) / 8)
+                let px = x(for: model.position(forZoom: z), centre: centre)
+                guard px > -4, px < size.width + 4 else { continue }
+                var tick = Path()
+                tick.move(to: CGPoint(x: px, y: baseline - 5))
+                tick.addLine(to: CGPoint(x: px, y: baseline + 1))
+                context.stroke(tick, with: .color(.white.opacity(0.3)), lineWidth: 1)
+            }
+        }
+        // Major ticks at lens stops, labelled.
+        for (i, stop) in stops.enumerated() {
+            let px = x(for: model.position(ofStop: i), centre: centre)
+            guard px > -30, px < size.width + 30 else { continue }
+            let active = abs(stop - model.zoom) / stop < 0.01
+            var tick = Path()
+            tick.move(to: CGPoint(x: px, y: baseline - 10))
+            tick.addLine(to: CGPoint(x: px, y: baseline + 1))
+            context.stroke(tick, with: .color(active ? Theme.accent : .white.opacity(0.75)), lineWidth: 1.5)
+            let text = Text(ZoomDial.label(stop))
+                .font(Theme.mono(8, weight: .semibold))
+                .foregroundStyle(active ? Theme.accent : Color.white.opacity(0.6))
+            context.draw(text, at: CGPoint(x: px, y: baseline - 17))
+        }
     }
 
     @ViewBuilder
     private var flipHint: some View {
         let p = model.flipProgress
         if p > 0.05 {
+            // Appears in the gap the scale stretches away from.
             Text(model.isFront ? "BACK" : "SELFIE")
                 .monoLabel(9, weight: .bold, color: p >= 1 ? Theme.accent : Theme.primary)
                 .opacity(Double(p))
-                .scaleEffect(0.85 + 0.15 * p, anchor: .trailing)
-                .fixedSize()
+                .scaleEffect(0.85 + 0.15 * p)
+                .frame(maxWidth: .infinity, alignment: model.isFront ? .trailing : .leading)
+                .padding(.horizontal, 22)
+                .offset(y: 6)
         }
     }
 

@@ -54,7 +54,11 @@ struct SettingsMenu: View {
                 .frame(width: 36, height: 4)
                 .padding(.bottom, 9)
         }
-        .glassEffect(.regular.tint(Color.black.opacity(0.38)), in: shape)
+        .background {
+            shape.fill(Color.black.opacity(0.42))
+                .background(.ultraThinMaterial, in: shape)
+                .overlay(shape.strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
+        }
         .gesture(
             DragGesture(minimumDistance: 20).onEnded { drag in
                 if drag.translation.height < -30 { onClose() }

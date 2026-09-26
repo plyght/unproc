@@ -5,6 +5,10 @@ options:
     iOS: "26.0"
   createIntermediateGroups: true
   xcodeVersion: "26.0"
+packages:
+  Glur:
+    url: https://github.com/joogps/Glur
+    from: "2.0.0"
 settings:
   base:
     SWIFT_VERSION: "5.0"
@@ -38,6 +42,8 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) UNPROC_APP
     dependencies:
+      - package: Glur
+        product: GlurBackdrop
       # extensionkit-extension -> "Embed ExtensionKit Extensions" phase
       # ($(EXTENSIONS_FOLDER_PATH) = Unproc.app/Extensions)
       - target: UnprocCapture
@@ -61,6 +67,9 @@ targets:
         # at Unproc.app/Extensions/UnprocCapture.appex.
         LD_RUNPATH_SEARCH_PATHS: ["$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks"]
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) UNPROC_EXTENSION
+    dependencies:
+      - package: Glur
+        product: GlurBackdrop
   UnprocWidgets:
     type: app-extension
     platform: iOS
