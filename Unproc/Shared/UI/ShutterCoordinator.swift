@@ -1,6 +1,9 @@
 import SwiftUI
 import CoreImage
 import Observation
+import os
+
+private let log = Logger(subsystem: "lol.peril.unproc", category: "shutter")
 
 /// Runs one press of the shutter end to end:
 /// capture → develop (off main) → (double exposure) → finish with Look → sink → store reload.
@@ -49,7 +52,10 @@ final class ShutterCoordinator {
     // MARK: - Public
 
     func shoot() {
-        guard camera.status == .running else { return }
+        guard camera.status == .running else {
+            log.notice("shoot ignored: camera status \(String(describing: self.camera.status), privacy: .public)")
+            return
+        }
         // Keep the queue shallow: at most one extra press waiting behind the active one.
         guard inFlight < 2 else { return }
 
@@ -84,6 +90,7 @@ final class ShutterCoordinator {
         let frame: CapturedFrame
         do {
             frame = try await camera.capture(output: output)
+            log.notice("captured raw=\(frame.rawDNG?.count ?? -1) processed=\(frame.processed?.count ?? -1)")
         } catch {
             await previous?.value
             report(error)
@@ -141,9 +148,11 @@ final class ShutterCoordinator {
 
         // 5. Store.
         do {
-            _ = try await sink.save(photo)
+            let id = try await sink.save(photo)
             savedCount += 1
+            log.notice("saved \(id, privacy: .public) jpeg=\(photo.jpeg.count)")
             await store.reload()
+            log.notice("store reloaded: \(self.store.items.count) items")
         } catch {
             report(error)
         }
@@ -151,6 +160,7 @@ final class ShutterCoordinator {
 
     private func report(_ error: Error) {
         let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        log.error("shot failed: \(message, privacy: .public)")
         lastError = message.uppercased()
         errorClearTask?.cancel()
         errorClearTask = Task { @MainActor [weak self] in

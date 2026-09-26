@@ -70,6 +70,7 @@ struct ThumbnailButton: View {
         .buttonStyle(ViewerPressStyle())
         .accessibilityLabel(Text("Photos"))
         .accessibilityIdentifier("thumbnail")
+        .accessibilityValue("\(store.items.count)")
         .task(id: latest?.id) {
             guard let latest else {
                 shown = nil

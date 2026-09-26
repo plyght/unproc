@@ -140,6 +140,13 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             | xcbeautify || echo "::warning::UI tour reported failures; exporting whatever was captured"
 
+      - name: App log
+        if: always()
+        run: |
+          xcrun simctl spawn "${{ steps.sim.outputs.udid }}" log show --last 30m --style compact \
+            --predicate 'subsystem BEGINSWITH "lol.peril.unproc" OR (process == "Unproc" AND messageType >= error)' \
+            | tail -200 || true
+
       - name: Export screenshots
         run: |
           mkdir -p raw screenshots

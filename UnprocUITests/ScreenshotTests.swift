@@ -23,6 +23,7 @@ final class ScreenshotTests: XCTestCase {
         settle(2)
         app.buttons["shutter"].tap()
         settle(2)
+        waitForPhotos()
         snap("02-after-shot")
 
         // Settings menu.
@@ -101,6 +102,7 @@ final class ScreenshotTests: XCTestCase {
         }
 
         // Viewer.
+        waitForPhotos()
         if tapIfPresent("thumbnail") {
             settle(1.5)
             snap("13-viewer")
@@ -116,6 +118,17 @@ final class ScreenshotTests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    /// Waits (up to 20 s) until the thumbnail reports at least one photo.
+    private func waitForPhotos() {
+        let thumb = app.descendants(matching: .any)["thumbnail"]
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline {
+            if let value = thumb.value as? String, let count = Int(value), count > 0 { return }
+            settle(0.5)
+        }
+        XCTFail("no photos appeared (thumbnail value: \(String(describing: thumb.value)))")
+    }
 
     @discardableResult
     private func tapIfPresent(_ id: String, timeout: TimeInterval = 3) -> Bool {

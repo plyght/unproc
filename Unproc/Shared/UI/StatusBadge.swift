@@ -10,7 +10,7 @@ struct StatusBadge: View {
         Button(action: action) {
             VStack(alignment: .trailing, spacing: 2) {
                 Text(LookLibrary.look(id: settings.lookID).code)
-                    .monoLabel(10, weight: .semibold, color: Theme.accent)
+                    .monoLabel(11, weight: .bold, color: Theme.accent)
                 HStack(spacing: 4) {
                     if settings.doubleExposure { tag("2×EXP") }
                     if settings.proMode { tag("PRO") }
@@ -22,7 +22,7 @@ struct StatusBadge: View {
             .padding(.vertical, 6)
             .background {
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(Color.black.opacity(0.32))
+                    .fill(Color.black.opacity(0.62))
             }
             .contentShape(Rectangle())
         }
