@@ -156,6 +156,7 @@ struct PhotoViewer: View {
         .scrollIndicators(.hidden)
         .scrollTargetBehavior(.paging)
         .scrollPosition(id: $currentID)
+        .sensoryFeedback(.impact(flexibility: .soft, intensity: 0.28), trigger: currentID)
         .scrollDisabled(isZoomed)
         .simultaneousGesture(dismissGesture, including: isZoomed ? .subviews : .all)
     }

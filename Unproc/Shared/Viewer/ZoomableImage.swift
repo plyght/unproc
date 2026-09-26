@@ -20,6 +20,8 @@ struct ZoomableImage: View {
 
     /// Live values (what is on screen).
     @State private var scale: CGFloat = 1
+    /// True while a pinch is pushing past 1× or 5× (one soft bump on entry).
+    @State private var pinchAtLimit = false
     @State private var offset: CGSize = .zero
     /// Values at the start of the current gesture.
     @State private var baseScale: CGFloat = 1
@@ -38,6 +40,9 @@ struct ZoomableImage: View {
                 }
                 .gesture(pan(in: size), including: scale > 1.01 ? .all : .subviews)
                 .simultaneousGesture(magnify(in: size))
+                .sensoryFeedback(trigger: pinchAtLimit) { _, atLimit in
+                    atLimit ? .impact(flexibility: .soft, intensity: 0.35) : nil
+                }
         }
         .onChange(of: scale > 1.01) { _, zoomed in
             if isActive { isZoomed = zoomed }
@@ -73,10 +78,13 @@ struct ZoomableImage: View {
             .onChanged { value in
                 let raw = baseScale * value.magnification
                 let live = rubberBandedScale(raw)
+                let atLimit = raw > maxScale || raw < minScale
+                if atLimit != pinchAtLimit { pinchAtLimit = atLimit }
                 scale = live
                 offset = anchoredOffset(scale: live, location: value.startLocation, in: size)
             }
             .onEnded { value in
+                pinchAtLimit = false
                 let target = min(max(scale, minScale), maxScale)
                 let targetOffset = target <= minScale
                     ? CGSize.zero

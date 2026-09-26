@@ -37,6 +37,10 @@ final class ZoomScrubModel {
     private(set) var detentTick = 0
     /// Bumped when the flip threshold is crossed (drives a heavy haptic).
     private(set) var flipTick = 0
+    /// Bumped every ~0.1 stop of zoom between detents (a whisper of a tick).
+    private(set) var fineTick = 0
+    /// 1…3 as the rubber band tightens toward a flip; drives rising pulses.
+    private(set) var tension = 0
     /// True while scrubbing from the selfie camera (the track only flips back).
     private(set) var isFront = false
 
@@ -44,6 +48,7 @@ final class ZoomScrubModel {
     private var startPosition: CGFloat = 0
     private var didFlip = false
     private var lastDetent: Int?
+    private var lastFineStep: Int?
 
     var length: CGFloat {
         guard stops.count > 1 else { return Self.detent }
@@ -123,7 +128,9 @@ final class ZoomScrubModel {
         stretch = 0
         flipProgress = 0
         didFlip = false
+        tension = 0
         lastDetent = detentIndex(at: position)
+        lastFineStep = nil
         isActive = true
     }
 
@@ -149,6 +156,7 @@ final class ZoomScrubModel {
             return flipCheck(overshoot: -raw, to: .front) ?? .zoom(zoom)
         }
         flipProgress = 0
+        tension = 0
         if raw > upper {
             position = upper
             stretch = Self.rubber(raw - upper)
@@ -160,6 +168,13 @@ final class ZoomScrubModel {
         let newZoom = zoom(at: raw)
         if let d = detentIndex(at: raw), d != lastDetent { detentTick += 1 }
         lastDetent = detentIndex(at: raw)
+        if lastDetent == nil {
+            let step = Int((log(newZoom) / 0.1).rounded(.down))
+            if let last = lastFineStep, step != last { fineTick += 1 }
+            lastFineStep = step
+        } else {
+            lastFineStep = nil
+        }
         guard abs(newZoom - zoom) / max(zoom, 0.01) > 0.004 else { return nil }
         zoom = newZoom
         return .zoom(newZoom)
@@ -184,6 +199,9 @@ final class ZoomScrubModel {
 
     private func flipCheck(overshoot: CGFloat, to side: Action.Side) -> Action? {
         flipProgress = min(overshoot / Self.flipDistance, 1)
+        // Rising pulses as it tightens: 25 %, 50 %, 75 % of the way.
+        let stage = min(Int(flipProgress * 4), 3)
+        if stage != tension { tension = stage }
         guard !didFlip, overshoot >= Self.flipDistance else { return nil }
         didFlip = true
         flipTick += 1

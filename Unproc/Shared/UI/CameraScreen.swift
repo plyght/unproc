@@ -173,8 +173,27 @@ struct CameraScreen: View {
         .animation(Theme.snappy, value: showSettings)
         .animation(Theme.snappy, value: showLensPicker)
         .animation(Theme.snappy, value: zoomScrub.isActive)
+        // Haptics — kept very light; only camera flips and errors are firm.
         .sensoryFeedback(.selection, trigger: zoomScrub.detentTick)
+        .sensoryFeedback(.impact(flexibility: .soft, intensity: 0.22), trigger: zoomScrub.fineTick)
+        .sensoryFeedback(trigger: zoomScrub.tension) { old, new in
+            new > old ? .impact(flexibility: .soft, intensity: 0.25 + 0.15 * Double(new)) : nil
+        }
         .sensoryFeedback(.impact(weight: .heavy, intensity: 1), trigger: zoomScrub.flipTick)
+        .sensoryFeedback(.selection, trigger: settings.value.lookID)
+        .sensoryFeedback(.impact(flexibility: .soft, intensity: 0.4), trigger: showSettings)
+        .sensoryFeedback(trigger: shutter.awaitingSecondExposure) { _, waiting in
+            waiting ? .impact(flexibility: .soft, intensity: 0.5) : nil
+        }
+        .sensoryFeedback(trigger: camera.openShutterDuration == nil) { _, closed in
+            closed ? .impact(flexibility: .rigid, intensity: 0.45) : nil
+        }
+        .sensoryFeedback(trigger: camera.focus.point) { _, point in
+            point != nil ? .impact(flexibility: .rigid, intensity: 0.35) : nil
+        }
+        .sensoryFeedback(trigger: camera.focus.isTracking) { _, tracking in
+            tracking ? .impact(weight: .medium, intensity: 0.6) : nil
+        }
         .animation(Theme.snappy, value: settings.value.proMode)
         .animation(Theme.snappy, value: settings.value.ratio)
         .animation(Theme.fade, value: longExposureStart)

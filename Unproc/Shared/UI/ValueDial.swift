@@ -79,7 +79,7 @@ struct ValueDial: View {
                 .contentShape(Rectangle())
                 .gesture(drag)
         }
-        .sensoryFeedback(.selection, trigger: hapticTick)
+        .sensoryFeedback(.impact(flexibility: .soft, intensity: 0.3), trigger: hapticTick)
         .onAppear { syncToCurrent() }
         .onChange(of: current) { _, _ in
             if dragBase == nil && isAuto { syncToCurrent() }
