@@ -29,13 +29,26 @@ struct LensButton: View {
     @State private var holdTask: Task<Void, Never>?
     @State private var moved = false
     @State private var startedExpanded = false
+    /// Latest drag translation, and the translation at the moment scrubbing
+    /// began: the ruler moves by travel *since* then, so the 8 pt it takes to
+    /// recognise a drag (or any creep during a hold) doesn't push the thumb
+    /// off the stop it started on.
+    @State private var lastTranslation: CGFloat = 0
+    @State private var scrubOrigin: CGFloat = 0
 
     static let rulerSize = CGSize(width: 64, height: 232)
+    /// Touch target while the ruler is out: wider and taller than the drawn
+    /// ruler so it can be grabbed anywhere on or near it. 104 pt wide stays
+    /// ~25 pt clear of the shutter on the narrowest phones (and on the outer
+    /// side just reaches the screen edge), in either handedness.
+    static let rulerHitSize = CGSize(width: 104, height: 264)
+    /// Invisible margin around the resting 52 pt circle (64 pt target).
+    private static let buttonHitOutset: CGFloat = 6
     private static let holdDelay: Duration = .milliseconds(260)
     private static let dragToScrub: CGFloat = 8
 
     private var label: String {
-        if isExpanded, !model.isFront { return ZoomDial.label(model.zoom, precise: true) }
+        if isExpanded, !model.isFront { return ZoomDial.label(model.displayZoom, precise: true) }
         return current?.buttonLabel ?? "—"
     }
 
@@ -89,32 +102,38 @@ struct LensButton: View {
                 .glassEffect(isExpanded ? .identity : .regular.interactive(), in: .circle)
         }
         .frame(width: 52, height: 52)
-        .contentShape(Circle())
+        // Transparent/glass regions don't hit-test on their own: an explicit
+        // shape, reaching past the 52 pt frame, so the whole ruler area grabs.
+        .contentShape(LensHitShape(
+            expandedSize: isExpanded ? Self.rulerHitSize : nil,
+            outset: Self.buttonHitOutset
+        ))
         .scaleEffect(isPressed && !isExpanded ? 0.94 : 1)
         .animation(Theme.press, value: isPressed)
         .animation(Theme.snappy, value: isExpanded)
         .gesture(
             DragGesture(minimumDistance: 0, coordinateSpace: .global)
                 .onChanged { value in
+                    lastTranslation = value.translation.height
                     if !isPressed {
                         isPressed = true
                         moved = false
                         startedExpanded = isExpanded
                         // Ruler already out: grab it straight away.
-                        if isExpanded { beginScrub() }
+                        if isExpanded { beginScrub(at: value.translation.height) }
                         holdTask?.cancel()
                         holdTask = Task { @MainActor in
                             try? await Task.sleep(for: Self.holdDelay)
                             guard !Task.isCancelled, isPressed, !isScrubbing else { return }
-                            beginScrub()
+                            beginScrub(at: lastTranslation)
                         }
                     }
                     if abs(value.translation.height) > 4 { moved = true }
                     if !isScrubbing, abs(value.translation.height) > Self.dragToScrub {
-                        beginScrub()
+                        beginScrub(at: value.translation.height)
                     }
                     if isScrubbing {
-                        onScrubChange(value.translation.height)
+                        onScrubChange(value.translation.height - scrubOrigin)
                     }
                 }
                 .onEnded { _ in
@@ -138,10 +157,26 @@ struct LensButton: View {
         .accessibilityIdentifier("lensButton")
     }
 
-    private func beginScrub() {
+    private func beginScrub(at translation: CGFloat) {
         guard !isScrubbing else { return }
+        scrubOrigin = translation
         isScrubbing = true
         onScrubBegin()
+    }
+}
+
+/// Hit area of the lens button: the circle plus a small margin at rest; a
+/// rectangle centred on it (larger than the ruler) while the ruler is out.
+private struct LensHitShape: Shape {
+    var expandedSize: CGSize?
+    var outset: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        if let size = expandedSize {
+            return Path(CGRect(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2,
+                               width: size.width, height: size.height))
+        }
+        return Path(ellipseIn: rect.insetBy(dx: -outset, dy: -outset))
     }
 }
 

@@ -536,7 +536,13 @@ struct CameraScreen: View {
             camera.setZoom(zoom)
         case .ended:
             pinchBase = nil
-            Log.ui.info("ui: pinch end at \(Double(zoomScrub.zoom), privacy: .public)x")
+            // Same resting rule as the ruler: near a stop lands exactly on it.
+            let settled = ZoomScrubModel.settle(zoomScrub.zoom, stops: camera.zoomStops)
+            if abs(settled - zoomScrub.zoom) > 0.0001 {
+                zoomScrub.present(stops: camera.zoomStops, zoom: settled, isFront: false)
+                camera.setZoom(settled)
+            }
+            Log.ui.info("ui: pinch end at \(Double(zoomScrub.zoom), privacy: .public)x (settled \(Double(settled), privacy: .public)x)")
             scheduleRulerHide(after: .milliseconds(1200))
         }
     }

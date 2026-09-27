@@ -3,18 +3,41 @@ import SwiftUI
 /// State + math for the zoom dial that appears when the lens button is held.
 ///
 /// The scale is laid out in points, from 0 (widest) to `length` (longest): each lens
-/// stop owns a short flat "detent" band where zoom holds still (so stops feel
-/// magnetic), and the ramps between stops are log-linear in zoom. Dragging
-/// past either end runs into rubber-band resistance; pull far enough past the
-/// bottom and the camera flips to the selfie lens (and, from selfie, pull past
-/// the top to flip back).
+/// stop owns a flat "detent" band where zoom holds exactly at the stop (so stops
+/// feel magnetic), and the ramps between stops are log-linear in zoom, free of
+/// any resistance, so every value in between (1.2×, 1.3×, …) is reachable.
+/// Dragging past either end runs into rubber-band resistance; pull far enough
+/// past the bottom and the camera flips to the selfie lens (and, from selfie,
+/// pull past the top to flip back).
+///
+/// Landing on a stop:
+/// - While dragging, anywhere inside a stop's band reads exactly the stop, with
+///   a detent tick on entering. The band's "captured" state has a little
+///   hysteresis so a finger resting on its edge doesn't chatter the haptic.
+/// - On release, the last few points of travel (lift-off jitter: the finger
+///   rolls as it leaves the glass) are ignored, then anything within
+///   `releaseZone` of a stop settles exactly on it; any other value is kept,
+///   rounded to 0.1× so it matches what the readout showed.
 @MainActor
 @Observable
 final class ZoomScrubModel {
     // MARK: Tuning
 
-    /// Flat band each lens stop occupies on the track.
-    static let detent: CGFloat = 18
+    /// Flat band each lens stop occupies on the track (±13 pt of finger travel
+    /// reads exactly the stop).
+    static let detent: CGFloat = 26
+    /// Once captured by a stop, the finger has to go this far past the band's
+    /// edge before the stop lets go (for the haptic / captured state; the zoom
+    /// itself is continuous at the edge, so it never jumps).
+    static let detentHysteresis: CGFloat = 5
+    /// Release zone, in |ln(zoom / stop)|: a release within ~±7 % of a stop
+    /// settles exactly on it (1.07× → 1×; 1.1× and beyond stay put).
+    static let releaseZone: CGFloat = 0.07
+    /// Lift-off jitter filter: at release, if the finger moved no more than
+    /// `liftOffJitter` points over the last `liftOffWindow` seconds, the
+    /// position from before that window is used instead of the final sample.
+    static let liftOffWindow: TimeInterval = 0.06
+    static let liftOffJitter: CGFloat = 6
     /// Track points per unit of ln(zoom).
     static let pointsPerLog: CGFloat = 72
     /// Raw overshoot needed to flip cameras.
@@ -44,10 +67,21 @@ final class ZoomScrubModel {
     private(set) var isFront = false
 
     private(set) var stops: [CGFloat] = [1]
-    private var startPosition: CGFloat = 0
+    /// Thumb position when the current scrub began.
+    private(set) var startPosition: CGFloat = 0
     private var didFlip = false
     private var lastDetent: Int?
     private var lastFineStep: Int?
+
+    private struct Sample {
+        let time: TimeInterval
+        let raw: CGFloat
+    }
+    /// Recent raw track positions (for the lift-off jitter filter). Samples only
+    /// arrive when the finger moves, so this is capped by count, not age: a
+    /// finger that rested still keeps its last sample as the reference.
+    @ObservationIgnored private var samples: [Sample] = []
+    private static let maxSamples = 32
 
     var length: CGFloat {
         guard stops.count > 1 else { return Self.detent }
@@ -56,6 +90,12 @@ final class ZoomScrubModel {
             total += log(stops[i + 1] / stops[i]) * Self.pointsPerLog
         }
         return total
+    }
+
+    /// What the readout shows: while dragging, the value a release here would
+    /// settle on (so "1.1×" never turns into 1× on lift, or vice versa).
+    var displayZoom: CGFloat {
+        isActive ? Self.settle(zoom, stops: stops) : zoom
     }
 
     // MARK: Mapping
@@ -110,6 +150,30 @@ final class ZoomScrubModel {
         stops.indices.first { abs(position(ofStop: $0) - s) <= Self.detent / 2 }
     }
 
+    /// The stop holding the thumb at `s`: inside a band, that stop; just
+    /// outside the band it was captured by (within the hysteresis), still that.
+    private func capturedStop(at s: CGFloat) -> Int? {
+        if let d = detentIndex(at: s) { return d }
+        if let last = lastDetent, stops.indices.contains(last),
+           abs(position(ofStop: last) - s) <= Self.detent / 2 + Self.detentHysteresis {
+            return last
+        }
+        return nil
+    }
+
+    /// Where a zoom value comes to rest on release: exactly on a stop within
+    /// `releaseZone`, otherwise rounded to 0.1× (clamped to the stops).
+    static func settle(_ zoom: CGFloat, stops: [CGFloat]) -> CGFloat {
+        guard let lo = stops.first, let hi = stops.last, zoom.isFinite else { return zoom }
+        let z = min(max(zoom, lo), hi)
+        if let nearest = stops.min(by: { abs(log($0 / z)) < abs(log($1 / z)) }),
+           abs(log(nearest / z)) <= releaseZone {
+            return nearest
+        }
+        let rounded = min(max((z * 10).rounded() / 10, lo), hi)
+        return stops.first { abs($0 - rounded) / $0 < 0.01 } ?? rounded
+    }
+
     /// iOS-style rubber band: resistance grows the further you pull.
     private static func rubber(_ overshoot: CGFloat) -> CGFloat {
         let c = stretchLimit
@@ -160,17 +224,21 @@ final class ZoomScrubModel {
         tension = 0
         lastDetent = detentIndex(at: position)
         lastFineStep = nil
+        samples.removeAll()
         isActive = true
     }
 
-    /// `dy` is the drag's vertical translation (negative = finger moved up).
+    /// `dy` is the drag's vertical translation since the scrub began (negative
+    /// = finger moved up); `now` is the sample's time (for the lift-off filter).
     /// Returns an action for the camera, if any.
-    func update(dy: CGFloat) -> Action? {
+    func update(dy: CGFloat, now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Action? {
         // After a flip the rest of this drag belongs to the old camera: ignore it
         // (otherwise it would zoom the back camera again, undoing the flip).
         guard isActive, !didFlip else { return nil }
         let raw = startPosition - dy
         let upper = length
+        samples.append(Sample(time: now, raw: raw))
+        if samples.count > Self.maxSamples { samples.removeFirst(samples.count - Self.maxSamples) }
 
         if isFront {
             // From selfie: only an upward pull (to flip back) does anything.
@@ -197,35 +265,67 @@ final class ZoomScrubModel {
         stretch = 0
         position = raw
         let newZoom = zoom(at: raw)
-        if let d = detentIndex(at: raw), d != lastDetent { detentTick += 1 }
-        lastDetent = detentIndex(at: raw)
-        if lastDetent == nil {
+        let captured = capturedStop(at: raw)
+        if let d = captured, d != lastDetent { detentTick += 1 }
+        lastDetent = captured
+        if captured == nil {
             let step = Int((log(newZoom) / 0.1).rounded(.down))
             if let last = lastFineStep, step != last { fineTick += 1 }
             lastFineStep = step
         } else {
             lastFineStep = nil
         }
-        guard abs(newZoom - zoom) / max(zoom, 0.01) > 0.004 else { return nil }
+        // Always land exactly on a stop (the 0.4 % filter below would otherwise
+        // leave the camera a hair off it when easing into a band).
+        let reachedStop = newZoom != zoom && stops.contains(newZoom)
+        guard reachedStop || abs(newZoom - zoom) / max(zoom, 0.01) > 0.004 else { return nil }
         zoom = newZoom
         return .zoom(newZoom)
     }
 
-    /// Ends the scrub. Values just off a stop snap to it.
-    func end() -> Action? {
+    /// Ends the scrub: ignores lift-off jitter, then settles exactly on a stop
+    /// within `releaseZone`, or keeps the value rounded to 0.1×.
+    func end(now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Action? {
         defer {
             isActive = false
             stretch = 0
             flipProgress = 0
+            samples.removeAll()
         }
         guard !didFlip, !isFront else { return nil }
-        if let nearest = stops.min(by: { abs(log($0 / zoom)) < abs(log($1 / zoom)) }),
-           abs(log(nearest / zoom)) < 0.07, nearest != zoom {
-            zoom = nearest
-            position = position(forZoom: nearest)
-            return .zoom(nearest)
+        let raw = settledRaw(at: now) ?? startPosition
+        // Never moved (a tap or hold on the ruler): leave the zoom as it was,
+        // even if it's an off-stop value from a pinch.
+        guard abs(raw - startPosition) >= 0.5 else {
+            position = startPosition
+            let original = zoom(at: startPosition)
+            guard abs(original - zoom) > max(zoom, 0.01) * 1e-4 else { return nil }
+            zoom = original
+            return .zoom(original)
         }
-        return nil
+        let s = min(max(raw, 0), length)
+        let settled = Self.settle(zoom(at: s), stops: stops)
+        position = position(forZoom: settled)
+        if let i = stops.firstIndex(of: settled) {
+            // Clicking onto a stop on release gets the same tick as dragging in.
+            if i != lastDetent { detentTick += 1 }
+            lastDetent = i
+        } else {
+            lastDetent = nil
+        }
+        let changed = abs(settled - zoom) > max(zoom, 0.01) * 1e-4
+        zoom = settled
+        return changed ? .zoom(settled) : nil
+    }
+
+    /// The finger's track position at release with lift-off jitter removed: if
+    /// the last `liftOffWindow` of the drag moved only a couple of points, the
+    /// position from just before it.
+    private func settledRaw(at now: TimeInterval) -> CGFloat? {
+        guard let last = samples.last else { return nil }
+        let cutoff = now - Self.liftOffWindow
+        let reference = samples.last(where: { $0.time <= cutoff }) ?? samples[0]
+        return abs(last.raw - reference.raw) <= Self.liftOffJitter ? reference.raw : last.raw
     }
 
     private func flipCheck(overshoot: CGFloat, to side: Action.Side) -> Action? {

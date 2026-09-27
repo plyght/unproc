@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 import XCTest
 @testable import Unproc
 
@@ -278,6 +279,164 @@ final class ZoomScrubModelTests: XCTestCase {
         XCTAssertFalse(m.isActive)
         XCTAssertEqual(m.position, m.position(ofStop: 2), accuracy: 1e-9)
         XCTAssertNil(m.update(dy: -40))
+    }
+
+    // MARK: Magnetic stops
+
+    /// Drags the thumb of an active scrub to track position `s`.
+    private func scrub(_ m: ZoomScrubModel, to s: CGFloat, now: TimeInterval = 0) -> ZoomScrubModel.Action? {
+        m.update(dy: m.startPosition - s, now: now)
+    }
+
+    func testReleaseJustOffAStopSettlesExactlyOnIt() {
+        for z: CGFloat in [1.03, 1.06, 0.95, 0.94, 2.12, 1.9] {
+            let m = ZoomScrubModel()
+            m.begin(stops: [0.5, 1, 2, 4, 8], zoom: z < 1.5 ? 2 : 1, isFront: false)
+            _ = scrub(m, to: m.position(forZoom: z))
+            let stop: CGFloat = z < 1.5 ? 1 : 2
+            XCTAssertEqual(m.end(), .zoom(stop), "\(z)× should settle on \(stop)×")
+            XCTAssertEqual(m.zoom, stop)
+            XCTAssertEqual(m.position, m.position(ofStop: stop == 1 ? 1 : 2), accuracy: 1e-9)
+        }
+    }
+
+    func testReleaseBetweenStopsKeepsTheValueRoundedToATenth() {
+        let cases: [(CGFloat, CGFloat)] = [(1.1, 1.1), (1.2, 1.2), (1.34, 1.3), (1.46, 1.5), (2.8, 2.8), (0.73, 0.7), (5.56, 5.6)]
+        for (dragged, expected) in cases {
+            let m = ZoomScrubModel()
+            m.begin(stops: [0.5, 1, 2, 4, 8], zoom: 1, isFront: false)
+            _ = scrub(m, to: m.position(forZoom: dragged))
+            let action = m.end()
+            XCTAssertEqual(m.zoom, expected, accuracy: 1e-9, "\(dragged)× released")
+            if abs(dragged - expected) > 1e-6 {
+                XCTAssertEqual(action, .zoom(m.zoom))
+            }
+        }
+    }
+
+    func testInsideTheBandZoomIsExactlyTheStop() {
+        let m = ZoomScrubModel()
+        m.begin(stops: [0.5, 1, 2, 4, 8], zoom: 2, isFront: false)
+        let c = m.position(ofStop: 1)
+        var s = m.position
+        while s >= c - ZoomScrubModel.detent / 2 + 0.5 {
+            _ = scrub(m, to: s)
+            if abs(s - c) <= ZoomScrubModel.detent / 2 {
+                XCTAssertEqual(m.zoom, 1, "exactly 1× at \(s - c) pt from the stop")
+            }
+            s -= 0.5
+        }
+    }
+
+    func testEnteringTheBandTicksOnceAndTheEdgeDoesNotChatter() {
+        let m = ZoomScrubModel()
+        m.begin(stops: [0.5, 1, 2, 4, 8], zoom: 2, isFront: false)
+        let edge = m.position(ofStop: 1) + ZoomScrubModel.detent / 2
+        let before = m.detentTick
+        var s = m.position
+        while s > edge - 1 {
+            _ = scrub(m, to: s)
+            s -= 1
+        }
+        XCTAssertEqual(m.detentTick, before + 1, "one tick on entering 1×")
+        XCTAssertEqual(m.zoom, 1)
+        // Resting on the edge: jitter in and out within the hysteresis.
+        for _ in 0..<10 {
+            _ = scrub(m, to: edge + ZoomScrubModel.detentHysteresis - 1)
+            _ = scrub(m, to: edge - 1)
+        }
+        XCTAssertEqual(m.detentTick, before + 1, "no chatter at the band's edge")
+        // Properly leaving and coming back ticks again.
+        _ = scrub(m, to: edge + ZoomScrubModel.detentHysteresis + 3)
+        _ = scrub(m, to: edge - 1)
+        XCTAssertEqual(m.detentTick, before + 2)
+    }
+
+    func testRampsAreContinuousAndResistanceFree() {
+        // Equal finger travel gives equal log-zoom change anywhere on a ramp.
+        let m = ZoomScrubModel()
+        m.begin(stops: [0.5, 1, 2, 4, 8], zoom: 1, isFront: false)
+        let a = m.position(forZoom: 1.2), b = m.position(forZoom: 1.5)
+        XCTAssertEqual(b - a, log(1.5 / 1.2) * ZoomScrubModel.pointsPerLog, accuracy: 1e-6)
+        // 1.1× is reachable (and kept) with a deliberate drag.
+        _ = scrub(m, to: m.position(forZoom: 1.1))
+        XCTAssertEqual(m.zoom, 1.1, accuracy: 1e-6)
+        _ = m.end()
+        XCTAssertEqual(m.zoom, 1.1, accuracy: 1e-9)
+    }
+
+    func testLiftOffJitterIsIgnored() {
+        let m = ZoomScrubModel()
+        m.begin(stops: [0.5, 1, 2, 4, 8], zoom: 1, isFront: false)
+        let edge = m.position(ofStop: 1) + ZoomScrubModel.detent / 2
+        _ = scrub(m, to: edge - 4, now: 0.0)
+        _ = scrub(m, to: edge, now: 0.5)
+        XCTAssertEqual(m.zoom, 1)
+        // The finger rolls ~6 pt as it lifts: past the release zone on its own.
+        let jitter = edge + 5.8
+        XCTAssertGreaterThan(abs(log(m.zoom(at: jitter))), ZoomScrubModel.releaseZone)
+        _ = scrub(m, to: jitter, now: 0.55)
+        XCTAssertNotEqual(m.zoom, 1)
+        XCTAssertEqual(m.end(now: 0.58), .zoom(1), "lift-off roll must not leave 1.1×")
+        XCTAssertEqual(m.zoom, 1)
+    }
+
+    func testDeliberateEndMovementIsKept() {
+        // Same travel, but the finger then rests before lifting: it's meant.
+        let m = ZoomScrubModel()
+        m.begin(stops: [0.5, 1, 2, 4, 8], zoom: 1, isFront: false)
+        let edge = m.position(ofStop: 1) + ZoomScrubModel.detent / 2
+        _ = scrub(m, to: edge, now: 0.5)
+        _ = scrub(m, to: edge + 5.8, now: 0.52)
+        XCTAssertEqual(m.end(now: 0.8), .zoom(1.1))
+        XCTAssertEqual(m.zoom, 1.1)
+
+        // A fast move right up to lift-off is well past the jitter threshold.
+        let f = ZoomScrubModel()
+        f.begin(stops: [0.5, 1, 2, 4, 8], zoom: 1, isFront: false)
+        _ = scrub(f, to: f.position(forZoom: 1.5), now: 0.53)
+        _ = scrub(f, to: f.position(forZoom: 3), now: 0.545)
+        XCTAssertNil(f.end(now: 0.55))
+        XCTAssertEqual(f.zoom, 3, accuracy: 1e-9)
+    }
+
+    func testReleaseOntoAStopTicks() {
+        let m = ZoomScrubModel()
+        m.begin(stops: [0.5, 1, 2, 4, 8], zoom: 2, isFront: false)
+        _ = scrub(m, to: m.position(forZoom: 1.05))
+        let before = m.detentTick
+        XCTAssertEqual(m.end(), .zoom(1))
+        XCTAssertEqual(m.detentTick, before + 1)
+    }
+
+    func testTouchWithoutMovingLeavesAnOffStopZoomAlone() {
+        let m = ZoomScrubModel()
+        m.begin(stops: [0.5, 1, 2, 4, 8], zoom: 1.03, isFront: false)
+        XCTAssertNil(m.update(dy: 0))
+        XCTAssertNil(m.end())
+        XCTAssertEqual(m.zoom, 1.03, accuracy: 1e-9)
+    }
+
+    func testReadoutShowsWhereAReleaseWouldLand() {
+        let m = ZoomScrubModel()
+        m.begin(stops: [0.5, 1, 2, 4, 8], zoom: 1, isFront: false)
+        _ = scrub(m, to: m.position(forZoom: 1.06))
+        XCTAssertEqual(ZoomDial.label(m.displayZoom), "1\u{00D7}")
+        _ = scrub(m, to: m.position(forZoom: 1.12))
+        XCTAssertEqual(ZoomDial.label(m.displayZoom), "1.1\u{00D7}")
+        _ = scrub(m, to: m.position(forZoom: 1.24))
+        XCTAssertEqual(ZoomDial.label(m.displayZoom), "1.2\u{00D7}")
+    }
+
+    func testSettle() {
+        let stops: [CGFloat] = [0.5, 1, 2, 4, 8]
+        XCTAssertEqual(ZoomScrubModel.settle(1.069, stops: stops), 1)
+        XCTAssertEqual(ZoomScrubModel.settle(0.94, stops: stops), 1)
+        XCTAssertEqual(ZoomScrubModel.settle(1.08, stops: stops), 1.1)
+        XCTAssertEqual(ZoomScrubModel.settle(1.2, stops: stops), 1.2)
+        XCTAssertEqual(ZoomScrubModel.settle(0.3, stops: stops), 0.5)
+        XCTAssertEqual(ZoomScrubModel.settle(12, stops: stops), 8)
+        XCTAssertEqual(ZoomScrubModel.settle(3.3, stops: stops), 3.3)
     }
 
     // MARK: Labels
