@@ -35,7 +35,7 @@ final class ScreenshotTests: XCTestCase {
             tapIfPresent("menu.format.raw")
             settle()
             snap("04-menu-look-raw")
-            if !tapIfPresent("menu.dismiss") { tapIfPresent("statusBadge") }
+            if !dismissMenu() { tapIfPresent("statusBadge") }
             settle()
             snap("05-look-applied")
         }
@@ -61,7 +61,7 @@ final class ScreenshotTests: XCTestCase {
             tapIfPresent("menu.pro.on")
             tapIfPresent("menu.zebras.on")
             tapIfPresent("menu.peaking.on")
-            if !tapIfPresent("menu.dismiss") { tapIfPresent("statusBadge") }
+            if !dismissMenu() { tapIfPresent("statusBadge") }
             settle()
             snap("09-pro")
             if tapIfPresent("pro.shutter") {
@@ -83,7 +83,7 @@ final class ScreenshotTests: XCTestCase {
             settle(0.5)
             tapIfPresent("menu.pro.off")
             tapIfPresent("menu.double.on")
-            if !tapIfPresent("menu.dismiss") { tapIfPresent("statusBadge") }
+            if !dismissMenu() { tapIfPresent("statusBadge") }
             settle()
             tapIfPresent("shutter")
             settle(2)
@@ -98,7 +98,7 @@ final class ScreenshotTests: XCTestCase {
                 settle(0.5)
                 tapIfPresent("menu.double.off")
                 tapIfPresent("menu.ratio.\(id)")
-                if !tapIfPresent("menu.dismiss") { tapIfPresent("statusBadge") }
+                if !dismissMenu() { tapIfPresent("statusBadge") }
                 settle()
                 snap("12b-ratio-\(name)")
             }
@@ -107,14 +107,14 @@ final class ScreenshotTests: XCTestCase {
             settle(0.5)
             tapIfPresent("menu.pro.on")
             tapIfPresent("menu.ratio.16:9")
-            if !tapIfPresent("menu.dismiss") { tapIfPresent("statusBadge") }
+            if !dismissMenu() { tapIfPresent("statusBadge") }
             settle()
             snap("12c-ratio-16x9-pro")
             tapIfPresent("statusBadge")
             settle(0.5)
             tapIfPresent("menu.pro.off")
             tapIfPresent("menu.ratio.4:3")
-            if !tapIfPresent("menu.dismiss") { tapIfPresent("statusBadge") }
+            if !dismissMenu() { tapIfPresent("statusBadge") }
             settle()
         }
 
@@ -155,7 +155,7 @@ final class ScreenshotTests: XCTestCase {
         if tapIfPresent("statusBadge") {
             settle(0.5)
             tapIfPresent("menu.ratio.16:9")
-            if !tapIfPresent("menu.dismiss") { tapIfPresent("statusBadge") }
+            if !dismissMenu() { tapIfPresent("statusBadge") }
             settle()
             tapIfPresent("lensButton")
             settle(0.6)
@@ -185,6 +185,17 @@ final class ScreenshotTests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    /// Closes the settings menu by tapping the tap-outside area near the bottom
+    /// of the screen (the menu itself covers the centre).
+    @discardableResult
+    private func dismissMenu() -> Bool {
+        let catcher = app.descendants(matching: .any)["menu.dismiss"]
+        guard catcher.waitForExistence(timeout: 2) else { return false }
+        catcher.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.985)).tap()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        return true
+    }
 
     /// Waits (up to 20 s) until the thumbnail reports at least one photo.
     private func waitForPhotos() {

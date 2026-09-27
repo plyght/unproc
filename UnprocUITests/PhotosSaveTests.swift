@@ -32,7 +32,7 @@ final class PhotosSaveTests: XCTestCase {
         // RAW + JPEG.
         tap("statusBadge")
         tap("menu.format.raw")
-        tap("menu.dismiss")
+        dismissMenu()
         let afterJPEG = photoCount()
         app.buttons["shutter"].tap()
         allowPhotoAccess()
@@ -48,6 +48,17 @@ final class PhotosSaveTests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    /// Closes the settings menu by tapping the tap-outside area near the bottom
+    /// of the screen (the menu itself covers the centre).
+    @discardableResult
+    private func dismissMenu() -> Bool {
+        let catcher = app.descendants(matching: .any)["menu.dismiss"]
+        guard catcher.waitForExistence(timeout: 2) else { return false }
+        catcher.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.985)).tap()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        return true
+    }
 
     /// Taps through any Photos permission alert (wording varies by prompt/OS).
     private func allowPhotoAccess() {
