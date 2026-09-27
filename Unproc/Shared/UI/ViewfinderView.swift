@@ -292,6 +292,16 @@ struct ViewfinderView: UIViewRepresentable {
 
             let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
             view.addGestureRecognizer(pinch)
+
+            // Never cancel touches for SwiftUI controls layered over the
+            // viewfinder (flash, selfie, badge, PRO chips): with the default
+            // `cancelsTouchesInView = true`, a recognised tap here swallowed
+            // their taps and they needed many presses.
+            for recognizer in view.gestureRecognizers ?? [] {
+                recognizer.cancelsTouchesInView = false
+                recognizer.delaysTouchesBegan = false
+                recognizer.delaysTouchesEnded = false
+            }
         }
 
         /// Maps a point in the view into normalised coordinates of the 3:4 frame,

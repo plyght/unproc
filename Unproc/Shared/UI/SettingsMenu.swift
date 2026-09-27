@@ -67,8 +67,8 @@ struct SettingsMenu: View {
                 .padding(.bottom, 9)
         }
         .background {
-            shape.fill(Color.black.opacity(0.42))
-                .background(.ultraThinMaterial, in: shape)
+            // Solid, no blur behind the menu.
+            shape.fill(Color(white: 0.07).opacity(0.94))
                 .overlay(shape.strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
         }
         .gesture(

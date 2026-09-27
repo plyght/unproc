@@ -401,7 +401,48 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     /// Center Stage front sensor (iPhone 17+).
     private var previewAngle: CGFloat {
         guard let device else { return 90 }
-        return CaptureFormatPicker.isSquareFront(device) ? 0 : 90
+        // Back sensors are all landscape-mounted: 90° in our portrait UI.
+        guard device.position == .front else { return 90 }
+        return frontPortraitAngle(for: device)
+    }
+
+    /// Rotation coordinator for a back camera, used as an orientation reference.
+    private lazy var referenceCoordinator: AVCaptureDevice.RotationCoordinator? = {
+        guard let back = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else { return nil }
+        return AVCaptureDevice.RotationCoordinator(device: back, previewLayer: nil)
+    }()
+
+    /// The rotation that shows the front camera upright while the phone is
+    /// held portrait, derived from Apple's rotation coordinators rather than
+    /// assuming a sensor mounting (the iPhone 17+ square Center Stage sensor
+    /// is mounted differently from earlier front cameras).
+    ///
+    /// Each coordinator's capture angle = its sensor's portrait angle + a
+    /// device-orientation term (with opposite sign for the mirrored front
+    /// camera). The back reference is 90° in portrait, so
+    /// `offset = backCapture − 90` is the orientation term, and the front's
+    /// portrait angle is `frontCapture + offset`.
+    private func frontPortraitAngle(for device: AVCaptureDevice) -> CGFloat {
+        let front: AVCaptureDevice.RotationCoordinator
+        if let existing = rotationCoordinators[device.uniqueID] {
+            front = existing
+        } else {
+            front = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
+            rotationCoordinators[device.uniqueID] = front
+        }
+        let frontCapture = front.videoRotationAngleForHorizonLevelCapture
+        let fallback: CGFloat = CaptureFormatPicker.isSquareFront(device) ? 0 : 90
+        guard let reference = referenceCoordinator else {
+            Log.camera.notice("rotation: no back reference; front capture=\(Double(frontCapture), privacy: .public) using \(Double(fallback), privacy: .public)")
+            return fallback
+        }
+        let backCapture = reference.videoRotationAngleForHorizonLevelCapture
+        var angle = (frontCapture + (backCapture - 90)).truncatingRemainder(dividingBy: 360)
+        if angle < 0 { angle += 360 }
+        angle = (angle / 90).rounded() * 90
+        if angle >= 360 { angle -= 360 }
+        Log.camera.notice("rotation: front portrait angle=\(Double(angle), privacy: .public) (frontCapture=\(Double(frontCapture), privacy: .public) backCapture=\(Double(backCapture), privacy: .public) square=\(CaptureFormatPicker.isSquareFront(device), privacy: .public) type=\(device.deviceType.rawValue, privacy: .public))")
+        return angle
     }
 
     /// Whether preview frames should be landscape (square front, landscape selfie).
@@ -608,7 +649,8 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         // connection lost its rotation (seen on the front camera): fix it on the
         // session queue, at most once per burst.
         let isLandscapeFrame = CVPixelBufferGetWidth(pixelBuffer) > CVPixelBufferGetHeight(pixelBuffer)
-        if isLandscapeFrame != expectsLandscapeFramesCached.withLock({ $0 }),
+        if !connection.isVideoMirrored,   // back cameras only; front angle comes from the coordinators
+           isLandscapeFrame != expectsLandscapeFramesCached.withLock({ $0 }),
            CVPixelBufferGetWidth(pixelBuffer) != CVPixelBufferGetHeight(pixelBuffer) {
             let shouldFix = rotationFixPending.withLock { pending -> Bool in
                 if pending { return false }
@@ -619,8 +661,8 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
                 let angle = connection.videoRotationAngle
                 sessionQueue.async { [self] in
                     let isFront = device?.position == .front
-                    // Wrong shape: flip between the two sensor mountings (90° ↔ 0°).
-                    let next: CGFloat = angle == 90 ? 0 : 90
+                    // Wrong shape: rotate a quarter turn from where we are.
+                    let next: CGFloat = (angle + 90).truncatingRemainder(dividingBy: 360)
                     Log.camera.error("preview: wrong frame orientation at angle=\(angle, privacy: .public) front=\(isFront, privacy: .public); switching to \(Double(next), privacy: .public)")
                     if let video = videoOutput.connection(with: .video), video.isVideoRotationAngleSupported(next) {
                         video.videoRotationAngle = next

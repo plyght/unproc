@@ -39,6 +39,29 @@ struct LensButton: View {
         return current?.buttonLabel ?? "—"
     }
 
+    /// Front camera: an icon (the word FRONT doesn't fit between the ruler's marks).
+    private var showsFrontIcon: Bool {
+        current?.isFront == true && !(isExpanded && !model.isFront)
+    }
+
+    @ViewBuilder
+    private var labelContent: some View {
+        if showsFrontIcon {
+            Image(systemName: "person.fill")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(isExpanded ? Theme.accent : Theme.primary)
+                .transition(.opacity)
+        } else {
+            Text(label)
+                .monoLabel(14, weight: .semibold,
+                           color: isExpanded ? Theme.accent : Theme.primary,
+                           uppercase: !isExpanded)
+                .monospacedDigit()
+                .contentTransition(.numericText())
+                .transition(.opacity)
+        }
+    }
+
     var body: some View {
         ZStack {
             if isExpanded {
@@ -47,12 +70,7 @@ struct LensButton: View {
                     .frame(width: Self.rulerSize.width + (isScrubbing ? 14 : 0), height: Self.rulerSize.height)
                     .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }
-            Text(label)
-                .monoLabel(current?.isFront == true && !isExpanded ? 11 : 14, weight: .semibold,
-                           color: isExpanded ? Theme.accent : Theme.primary,
-                           uppercase: !isExpanded)
-                .monospacedDigit()
-                .contentTransition(.numericText())
+            labelContent
                 .animation(Theme.snappy, value: current?.id)
                 // The number grows while your finger is on it…
                 .scaleEffect(isScrubbing ? 1.42 : 1, anchor: .center)

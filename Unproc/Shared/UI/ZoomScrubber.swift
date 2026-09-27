@@ -166,7 +166,9 @@ final class ZoomScrubModel {
     /// `dy` is the drag's vertical translation (negative = finger moved up).
     /// Returns an action for the camera, if any.
     func update(dy: CGFloat) -> Action? {
-        guard isActive else { return nil }
+        // After a flip the rest of this drag belongs to the old camera: ignore it
+        // (otherwise it would zoom the back camera again, undoing the flip).
+        guard isActive, !didFlip else { return nil }
         let raw = startPosition - dy
         let upper = length
 

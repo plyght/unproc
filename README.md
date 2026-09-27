@@ -96,9 +96,6 @@ MIT. see [LICENSE](LICENSE).
 
 `Unproc/App/DemoScene.jpg` (used only by the simulator demo feed for CI screenshots) is a photo from [Unsplash](https://unsplash.com/photos/1500530855697-b586d89ba3ee), used under the Unsplash License.
 
-## Dependencies
-
-- [Glur](https://github.com/joogps/Glur) (`GlurBackdrop`) — the progressive blur on the top and bottom edges of the 16:9 viewfinder. Note: `GlurBackdrop` uses a private Core Animation API; fine for sideloading, review before an App Store submission.
 
 ## Camera Control (iPhone 16 and later)
 

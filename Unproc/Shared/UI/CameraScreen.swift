@@ -1,6 +1,5 @@
 import SwiftUI
 import AVKit
-import GlurBackdrop
 import os
 
 /// The whole camera: viewfinder, status badge, settings menu, PRO controls,
@@ -319,15 +318,8 @@ struct CameraScreen: View {
             }
 
             if value.ratio == .sixteenNine {
-                // Tall frame: soften the top and bottom edges so the frame melts into
-                // the black and the floating controls sit on calm image. Progressive
-                // (Glur backdrop) blur plus a gentle darkening, both on smooth ramps.
-                GlurView(radius: 6, mask: .linear(stops: [
-                    .init(intensity: 1, location: 0),
-                    .init(intensity: 0, location: 0.13),
-                    .init(intensity: 0, location: 0.80),
-                    .init(intensity: 1, location: 1),
-                ], startPoint: .top, endPoint: .bottom))
+                // Tall frame: a gentle darkening at the top and bottom edges so the
+                // floating controls stay legible (no blur).
                 LinearGradient(stops: [
                     .init(color: .black.opacity(0.42), location: 0),
                     .init(color: .black.opacity(0), location: 0.12),
@@ -680,15 +672,24 @@ struct CameraScreen: View {
         scheduleRulerHide(after: .milliseconds(1600))
     }
 
+    /// A flip changes cameras: fold the ruler away at once so it never shows
+    /// the old camera's zoom while the new one comes up.
+    private func foldRulerForFlip() {
+        zoomHideTask?.cancel()
+        withAnimation(Theme.exit) { zoomDialVisible = false }
+    }
+
     private func perform(_ action: ZoomScrubModel.Action?) {
         switch action {
         case .zoom(let zoom)?:
             camera.setZoom(zoom)
         case .flip(.front)?:
             Log.ui.info("ui: zoom flip to front")
+            foldRulerForFlip()
             if let front = camera.lenses.first(where: \.isFront) { select(front) }
         case .flip(.back)?:
             Log.ui.info("ui: zoom flip to back")
+            foldRulerForFlip()
             let back = camera.lenses.first { $0.id == "back.wide" } ?? camera.lenses.first { !$0.isFront }
             if let back { select(back) }
         case nil:
