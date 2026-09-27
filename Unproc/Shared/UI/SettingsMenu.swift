@@ -1,11 +1,24 @@
 import SwiftUI
 
 /// Liquid Glass panel that drops down over the top of the viewfinder.
-/// Each row is a label followed by a `GlassSegmented` selector whose glass
-/// capsule slides between options.
+///
+///     CAPTURE ────────────────────────────
+///     [JPEG|RAW] [BAYER|PRORAW]    [⚡̸|⚡A|⚡]
+///     [▯ 4:3 | ▯ 3:2 | ▯ 16:9 | □ 1:1]
+///     LOOK ──────────────────── NEUTRAL
+///     [ZERO|S1 01|…] →
+///     ASSISTS ────────────────────────────
+///     [2×EXP] [PRO] [ZEBRAS] [PEAKING]
+///     APPEARANCE ────────────── ORANGE
+///     ● ● ● ● →              HAND [L|R]
+///
+/// The panel is the only glass surface; the controls inside use plain fills
+/// (see `SettingsControls.swift`) so nothing stacks glass on glass.
 struct SettingsMenu: View {
     let settings: SettingsStore
     var onClose: () -> Void = {}
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var shape: UnevenRoundedRectangle {
         UnevenRoundedRectangle(
@@ -19,44 +32,13 @@ struct SettingsMenu: View {
 
     var body: some View {
         let value = settings.value
-        VStack(alignment: .leading, spacing: 6) {
-            row("FORMAT", id: "format", selected: value.output.rawValue, options: [
-                ("jpeg", "JPEG"), ("raw", "RAW"),
-            ]) { settings.value.output = OutputFormat(rawValue: $0) ?? .jpeg }
-
-            if value.output == .raw {
-                row("RAW", id: "raw", selected: value.rawFlavor == .bayer ? "bayer" : "proraw", options: [
-                    ("bayer", "BAYER"), ("proraw", "PRORAW"),
-                ]) { settings.value.rawFlavor = $0 == "bayer" ? .bayer : .proRAW }
-                .transition(.opacity)
-            }
-
-            row("RATIO", id: "ratio", selected: value.ratio.rawValue,
-                options: FrameRatio.allCases.map { ($0.rawValue, $0.rawValue) }) {
-                settings.value.ratio = FrameRatio(rawValue: $0) ?? .fourThree
-            }
-
-            lookRow(selectedID: value.lookID)
-
-            toggleRow("DOUBLE EXP", id: "double", isOn: value.doubleExposure) { settings.value.doubleExposure = $0 }
-            toggleRow("PRO", id: "pro", isOn: value.proMode) { settings.value.proMode = $0 }
-            toggleRow("ZEBRAS", id: "zebras", isOn: value.zebras) { settings.value.zebras = $0 }
-            toggleRow("PEAKING", id: "peaking", isOn: value.peaking) { settings.value.peaking = $0 }
-
-            row("FLASH", id: "flash", selected: value.flash.rawValue,
-                options: [("off", "OFF"), ("auto", "AUTO"), ("on", "ON")]) {
-                settings.value.flash = FlashSetting(rawValue: $0) ?? .off
-            }
-
-            row("HAND", id: "hand", selected: value.lefty ? "left" : "right",
-                options: [("right", "RIGHT"), ("left", "LEFT")]) {
-                settings.value.lefty = $0 == "left"
-            }
-
-            accentRow(selectedID: value.accent)
+        VStack(alignment: .leading, spacing: 14) {
+            captureSection
+            lookSection
+            assistsSection
+            appearanceSection
         }
-        .padding(.leading, 18)
-        .padding(.trailing, 12)
+        .padding(.horizontal, 16)
         .padding(.top, 16)
         .padding(.bottom, 26)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -66,13 +48,16 @@ struct SettingsMenu: View {
                 .frame(width: 36, height: 4)
                 .padding(.bottom, 9)
         }
-        .background {
-            // Solid, no blur behind the menu.
-            shape.fill(Color(white: 0.07).opacity(0.94))
-                .overlay(shape.strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
+        .glassEffect(.regular.tint(Color.black.opacity(0.45)), in: shape)
+        .overlay {
+            shape.strokeBorder(Color.white.opacity(0.1), lineWidth: 1)
+                .allowsHitTesting(false)
         }
+        // Glass doesn't hit-test: without this, taps in the gaps between
+        // controls would fall through to the tap-outside catcher and close.
+        .contentShape(shape)
         .gesture(
-            DragGesture(minimumDistance: 20).onEnded { drag in
+            DragGesture(minimumDistance: 20).onEnded { (drag: DragGesture.Value) in
                 if drag.translation.height < -30 { onClose() }
             }
         )
@@ -80,102 +65,198 @@ struct SettingsMenu: View {
         .sensoryFeedback(.selection, trigger: value)
     }
 
-    // MARK: Rows
+    // MARK: Sections
 
-    private static let labelWidth: CGFloat = 92
-
-    private func label(_ title: String) -> some View {
-        Text(title)
-            .monoLabel(10, color: Color.white.opacity(0.5))
-            .lineLimit(1)
-            .frame(width: Self.labelWidth, alignment: .leading)
-    }
-
-    /// `options` are (value, label); accessibility ids are "menu.<id>.<value>".
-    private func row(
-        _ title: String,
-        id: String,
-        selected: String,
-        options: [(String, String)],
-        set: @escaping (String) -> Void
-    ) -> some View {
-        HStack(alignment: .center, spacing: 0) {
-            label(title)
-            GlassSegmented(
-                segments: options.map { GlassSegment(id: $0.0, label: $0.1, accessibilityID: "menu.\(id).\($0.0)") },
-                selectedID: selected,
-                onSelect: set
-            )
-            Spacer(minLength: 0)
-        }
-    }
-
-    private func toggleRow(_ title: String, id: String, isOn: Bool, set: @escaping (Bool) -> Void) -> some View {
-        row(title, id: id, selected: isOn ? "on" : "off", options: [("off", "OFF"), ("on", "ON")]) {
-            set($0 == "on")
-        }
-    }
-
-    /// ORANGE plus the finishes of this phone model, each label in its colour.
-    private func accentRow(selectedID: String) -> some View {
-        let finishes = DeviceModel.finishes
-        let known = selectedID == AccentID.orange || finishes.contains { $0.id == selectedID }
-        let segments = [GlassSegment(id: AccentID.orange, label: "ORANGE", accessibilityID: "menu.accent.orange",
-                                     tint: DeviceAccent.orangeColor)]
-            + finishes.map {
-                GlassSegment(id: $0.id, label: $0.name, accessibilityID: "menu.accent.\($0.id)",
-                             tint: DeviceAccent.preview(of: $0))
+    private var captureSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            MenuSectionHeader(title: "CAPTURE")
+            formatRow
+            PillSegmented(
+                segments: Self.ratioSegments,
+                selectedID: settings.value.ratio.rawValue,
+                horizontalPadding: 6,
+                fillsWidth: true
+            ) { (id: String) in
+                settings.value.ratio = FrameRatio(rawValue: id) ?? .fourThree
             }
-        return HStack(alignment: .center, spacing: 0) {
-            label("ACCENT")
-            ScrollViewReader { proxy in
+        }
+    }
+
+    /// JPEG | RAW, the RAW flavour (only while RAW), and flash on the right.
+    private var formatRow: some View {
+        let value = settings.value
+        let flavorTransition = Theme.transition(
+            .opacity.combined(with: .scale(scale: 0.9, anchor: .leading)),
+            reduceMotion: reduceMotion
+        )
+        return HStack(spacing: 8) {
+            PillSegmented(segments: Self.formatSegments, selectedID: value.output.rawValue) { (id: String) in
+                settings.value.output = OutputFormat(rawValue: id) ?? .jpeg
+            }
+            if value.output == .raw {
+                PillSegmented(
+                    segments: Self.flavorSegments,
+                    selectedID: value.rawFlavor == .bayer ? "bayer" : "proraw",
+                    fontSize: 9,
+                    height: 26,
+                    horizontalPadding: 8
+                ) { (id: String) in
+                    settings.value.rawFlavor = id == "bayer" ? .bayer : .proRAW
+                }
+                .transition(flavorTransition)
+            }
+            Spacer(minLength: 0)
+            PillSegmented(
+                segments: Self.flashSegments,
+                selectedID: value.flash.rawValue,
+                horizontalPadding: 8
+            ) { (id: String) in
+                settings.value.flash = FlashSetting(rawValue: id) ?? .off
+            }
+        }
+    }
+
+    private var lookSection: some View {
+        let selectedID = settings.value.lookID
+        return VStack(alignment: .leading, spacing: 8) {
+            MenuSectionHeader(title: "LOOK", detail: LookLibrary.look(id: selectedID).name)
+            ScrollViewReader { (proxy: ScrollViewProxy) in
                 ScrollView(.horizontal, showsIndicators: false) {
-                    GlassSegmented(
-                        segments: segments,
-                        selectedID: known ? selectedID : AccentID.orange,
-                        onSelect: { settings.value.accent = $0 }
-                    )
+                    PillSegmented(segments: Self.lookSegments, selectedID: selectedID) { (id: String) in
+                        settings.value.lookID = id
+                    }
                     .padding(.trailing, 28)
                 }
                 .scrollClipDisabled()
-                .mask {
-                    HStack(spacing: 0) {
-                        Color.black
-                        LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
-                            .frame(width: 28)
-                    }
-                }
+                .mask { TrailingFadeMask() }
                 .onAppear { proxy.scrollTo(selectedID, anchor: .center) }
             }
         }
     }
 
-    private func lookRow(selectedID: String) -> some View {
-        HStack(alignment: .center, spacing: 0) {
-            label("LOOK")
-            ScrollViewReader { proxy in
-                ScrollView(.horizontal, showsIndicators: false) {
-                    GlassSegmented(
-                        segments: LookLibrary.all.map {
-                            GlassSegment(id: $0.id, label: $0.code, accessibilityID: "menu.look.\($0.id)")
-                        },
-                        selectedID: selectedID,
-                        onSelect: { settings.value.lookID = $0 }
-                    )
-                    .padding(.trailing, 28)
+    private var assistsSection: some View {
+        let value = settings.value
+        return VStack(alignment: .leading, spacing: 8) {
+            MenuSectionHeader(title: "ASSISTS")
+            HStack(spacing: 6) {
+                ToggleTile(title: "2×EXP", symbol: "square.on.square", id: "double",
+                           isOn: value.doubleExposure) { (on: Bool) in
+                    settings.value.doubleExposure = on
                 }
-                .scrollClipDisabled()
-                .mask {
-                    HStack(spacing: 0) {
-                        Color.black
-                        LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
-                            .frame(width: 28)
-                    }
+                ToggleTile(title: "PRO", symbol: "slider.horizontal.3", id: "pro",
+                           isOn: value.proMode) { (on: Bool) in
+                    settings.value.proMode = on
                 }
-                .onAppear {
-                    proxy.scrollTo(selectedID, anchor: .center)
+                ToggleTile(title: "ZEBRAS", symbol: "sun.max", id: "zebras",
+                           isOn: value.zebras) { (on: Bool) in
+                    settings.value.zebras = on
+                }
+                ToggleTile(title: "PEAKING", symbol: "scope", id: "peaking",
+                           isOn: value.peaking) { (on: Bool) in
+                    settings.value.peaking = on
                 }
             }
         }
+    }
+
+    private var appearanceSection: some View {
+        let swatches = Self.accentSwatches
+        let stored = settings.value.accent
+        // Anything unknown resolves to orange (always first).
+        let selected: AccentSwatch = swatches.first(where: { (swatch: AccentSwatch) -> Bool in
+            swatch.id == stored
+        }) ?? swatches[0]
+        return VStack(alignment: .leading, spacing: 6) {
+            MenuSectionHeader(title: "APPEARANCE", detail: selected.name)
+            HStack(spacing: 10) {
+                ScrollViewReader { (proxy: ScrollViewProxy) in
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        AccentSwatches(swatches: swatches, selectedID: selected.id) { (id: String) in
+                            settings.value.accent = id
+                        }
+                        .padding(.trailing, 20)
+                    }
+                    .scrollClipDisabled()
+                    .mask { TrailingFadeMask(width: 20) }
+                    .onAppear { proxy.scrollTo(selected.id, anchor: .center) }
+                }
+                handControl
+            }
+        }
+    }
+
+    private var handControl: some View {
+        HStack(spacing: 6) {
+            Text("HAND")
+                .monoLabel(9, weight: .semibold, color: Color.white.opacity(0.42))
+            PillSegmented(
+                segments: Self.handSegments,
+                selectedID: settings.value.lefty ? "left" : "right",
+                horizontalPadding: 11
+            ) { (id: String) in
+                settings.value.lefty = id == "left"
+            }
+        }
+        .fixedSize()
+    }
+
+    // MARK: Options
+    // Accessibility ids are "menu.<row>.<value>" (UI tests rely on them).
+
+    private static var formatSegments: [MenuSegment] {
+        [
+            MenuSegment(id: "jpeg", label: "JPEG", accessibilityID: "menu.format.jpeg"),
+            MenuSegment(id: "raw", label: "RAW", accessibilityID: "menu.format.raw"),
+        ]
+    }
+
+    private static var flavorSegments: [MenuSegment] {
+        [
+            MenuSegment(id: "bayer", label: "BAYER", accessibilityID: "menu.raw.bayer"),
+            MenuSegment(id: "proraw", label: "PRORAW", accessibilityID: "menu.raw.proraw"),
+        ]
+    }
+
+    private static var flashSegments: [MenuSegment] {
+        [
+            MenuSegment(id: "off", symbol: "bolt.slash.fill", accessibilityID: "menu.flash.off",
+                        accessibilityLabel: "Flash off"),
+            MenuSegment(id: "auto", symbol: "bolt.badge.automatic.fill", accessibilityID: "menu.flash.auto",
+                        accessibilityLabel: "Flash auto"),
+            MenuSegment(id: "on", symbol: "bolt.fill", accessibilityID: "menu.flash.on",
+                        accessibilityLabel: "Flash on"),
+        ]
+    }
+
+    private static var ratioSegments: [MenuSegment] {
+        FrameRatio.allCases.map { (ratio: FrameRatio) -> MenuSegment in
+            MenuSegment(id: ratio.rawValue, label: ratio.rawValue, ratio: CGFloat(ratio.portraitAspect),
+                        accessibilityID: "menu.ratio.\(ratio.rawValue)")
+        }
+    }
+
+    private static var lookSegments: [MenuSegment] {
+        LookLibrary.all.map { (look: Look) -> MenuSegment in
+            MenuSegment(id: look.id, label: look.code, accessibilityID: "menu.look.\(look.id)",
+                        accessibilityLabel: look.name)
+        }
+    }
+
+    private static var handSegments: [MenuSegment] {
+        [
+            MenuSegment(id: "left", label: "L", accessibilityID: "menu.hand.left",
+                        accessibilityLabel: "Left-handed"),
+            MenuSegment(id: "right", label: "R", accessibilityID: "menu.hand.right",
+                        accessibilityLabel: "Right-handed"),
+        ]
+    }
+
+    /// ORANGE plus the finishes of this phone model.
+    private static var accentSwatches: [AccentSwatch] {
+        let orange = AccentSwatch(id: AccentID.orange, name: "ORANGE", color: DeviceAccent.orangeColor)
+        let finishes = DeviceModel.finishes.map { (finish: DeviceModel.Finish) -> AccentSwatch in
+            AccentSwatch(id: finish.id, name: finish.name, color: DeviceAccent.preview(of: finish))
+        }
+        return [orange] + finishes
     }
 }
