@@ -34,8 +34,13 @@ final class PhotosSaveTests: XCTestCase {
         tap("menu.format.raw")
         dismissMenu()
         let afterJPEG = photoCount()
-        app.buttons["shutter"].tap()
+        pressShutter()
         allowPhotoAccess()
+        // One retry if the press landed during the menu's closing animation.
+        if afterJPEG > 0, !waitForPhotoCount(above: afterJPEG, timeout: 10) {
+            pressShutter()
+            allowPhotoAccess()
+        }
         verifySaved("RAW+JPEG", countBefore: afterJPEG)
         snap("P2-saved-raw")
 
@@ -48,6 +53,17 @@ final class PhotosSaveTests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    /// Taps the shutter once it's enabled and hittable (after menus settle).
+    private func pressShutter() {
+        let shutter = app.buttons["shutter"]
+        let deadline = Date().addingTimeInterval(8)
+        while Date() < deadline, !(shutter.exists && shutter.isHittable && shutter.isEnabled) {
+            settle(0.25)
+        }
+        settle(0.4)
+        shutter.tap()
+    }
 
     /// Closes the settings menu by tapping the tap-outside area near the bottom
     /// of the screen (the menu itself covers the centre).

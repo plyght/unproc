@@ -164,7 +164,7 @@ jobs:
         run: |
           xcrun simctl spawn "${{ steps.sim.outputs.udid }}" log show --last 30m --style compact \
             --predicate 'subsystem BEGINSWITH "lol.peril.unproc" OR (process == "Unproc" AND messageType >= error)' \
-            | tail -800 || true
+            | tail -3000 || true
 
       - name: Export screenshots
         if: always()
