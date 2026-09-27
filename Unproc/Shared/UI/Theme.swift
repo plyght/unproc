@@ -118,7 +118,11 @@ struct PressableStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         let pressed = configuration.isPressed
+        // The whole label frame is the tap target: glass backgrounds don't
+        // hit-test, so an icon-only label would otherwise only respond on
+        // the glyph's own pixels (the "tap it ten times" flash button).
         return configuration.label
+            .contentShape(Rectangle())
             .scaleEffect(pressed ? scale : 1)
             .animation(Theme.press, value: pressed)
             .sensoryFeedback(.impact(weight: .light), trigger: pressed) { _, isPressed in

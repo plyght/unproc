@@ -363,7 +363,7 @@ struct CameraScreen: View {
             .padding(12)
         }
         .overlay(alignment: .topLeading) {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 0) {
                 if camera.hasFlash {
                     flashButton
                 } else if camera.supportsSelfieOrientation && camera.currentLens?.isFront == true {
@@ -371,7 +371,7 @@ struct CameraScreen: View {
                 }
                 openAppButton
             }
-            .padding(12)
+            .padding(8)   // buttons carry 4pt of invisible tap margin: glass stays 12pt from the edge
             .animation(Theme.snappy, value: camera.currentLens?.id)
         }
         .overlay(alignment: .bottom) {
@@ -471,6 +471,8 @@ struct CameraScreen: View {
                 .contentTransition(.symbolEffect(.replace))
                 .frame(width: 38, height: 38)
                 .glassEffect(.regular.interactive(), in: .circle)
+                .padding(4)   // 46pt tap target; the overlay padding below compensates
+                .contentShape(Rectangle())
         }
         .buttonStyle(.pressable)
         .accessibilityLabel("Flash \(flash.rawValue)")
@@ -489,6 +491,8 @@ struct CameraScreen: View {
                 .contentTransition(.symbolEffect(.replace))
                 .frame(width: 38, height: 38)
                 .glassEffect(.regular.interactive(), in: .circle)
+                .padding(4)   // 46pt tap target; the overlay padding below compensates
+                .contentShape(Rectangle())
         }
         .buttonStyle(.pressable)
         .accessibilityLabel(landscape ? "Portrait selfie" : "Landscape selfie")
@@ -506,6 +510,7 @@ struct CameraScreen: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 7)
                     .glassEffect(.regular.interactive(), in: .capsule)
+                    .padding(4)
             }
             .buttonStyle(.pressable)
         }

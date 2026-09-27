@@ -341,6 +341,12 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             throw UnprocError.cameraUnavailable
         }
         session.addInput(newInput)
+        // Adopt the new device now: everything below (preview rotation, selfie
+        // aspect) reads `device`. Assigning it only after commit made the front
+        // camera's rotation come from the outgoing back camera (always 90°).
+        input = newInput
+        device = newDevice
+        self.lens = lens
 
         // Keep the device locked across commit so the session can't override the format.
         var lockedForFormat = false
@@ -369,9 +375,6 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         configureConnections(isFront: newDevice.position == .front)
         applySelfieAspect()
 
-        input = newInput
-        device = newDevice
-        self.lens = lens
         frozenISO = nil
         frozenDuration = nil
         simulatingLongExposure = false
