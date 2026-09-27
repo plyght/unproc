@@ -103,8 +103,14 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
 
     /// Guards the frame-orientation fix (video queue → session queue).
     private let rotationFixPending = Mutex(false)
-    /// `expectsLandscapeFrames`, readable from the video queue.
-    private let expectsLandscapeFramesCached = Mutex(false)
+    /// Square front camera frame-shape check (video queue ↔ session queue).
+    private let selfieShape = Mutex(SelfieShapeCheck())
+    /// The square front sensor's 4x3/3x4 naming is swapped relative to our
+    /// portrait UI (learned from frames, remembered across launches).
+    private var selfieRatioSwapped: Bool {
+        get { UserDefaults.standard.bool(forKey: "selfieRatioSwapped.\(DeviceModel.identifier)") }
+        set { UserDefaults.standard.set(newValue, forKey: "selfieRatioSwapped.\(DeviceModel.identifier)") }
+    }
     private var rotationCoordinators: [String: AVCaptureDevice.RotationCoordinator] = [:]
     private var inFlight: [Int64: PhotoCaptureDelegate] = [:]
     private var deviceObservations: [NSKeyValueObservation] = []
@@ -743,13 +749,15 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        // Frames must arrive portrait (rotation 90). A landscape buffer means a
-        // connection lost its rotation (seen on the front camera): fix it on the
-        // session queue, at most once per burst.
-        let isLandscapeFrame = CVPixelBufferGetWidth(pixelBuffer) > CVPixelBufferGetHeight(pixelBuffer)
-        if !connection.isVideoMirrored,   // back cameras only; front angle comes from the coordinators
-           isLandscapeFrame != expectsLandscapeFramesCached.withLock({ $0 }),
-           CVPixelBufferGetWidth(pixelBuffer) != CVPixelBufferGetHeight(pixelBuffer) {
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        if connection.isVideoMirrored {
+            checkSelfieShape(landscape: width > height, square: width == height)
+        } else if connection.videoRotationAngle != 90, width > height {
+            // Back cameras are always 90° in our portrait UI. If a connection
+            // lost that (seen after front↔back switches), restore exactly 90 —
+            // never step relative to the current angle: stray frames from the
+            // outgoing camera used to walk it 90 → 180 → 270 (upside down).
             let shouldFix = rotationFixPending.withLock { pending -> Bool in
                 if pending { return false }
                 pending = true
@@ -758,14 +766,14 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             if shouldFix {
                 let angle = connection.videoRotationAngle
                 sessionQueue.async { [self] in
-                    let isFront = device?.position == .front
-                    // Wrong shape: rotate a quarter turn from where we are.
-                    let next: CGFloat = (angle + 90).truncatingRemainder(dividingBy: 360)
-                    Log.camera.error("preview: wrong frame orientation at angle=\(angle, privacy: .public) front=\(isFront, privacy: .public); switching to \(Double(next), privacy: .public)")
-                    if let video = videoOutput.connection(with: .video), video.isVideoRotationAngleSupported(next) {
-                        video.videoRotationAngle = next
-                    }
-                    rotationFixPending.withLock { $0 = false }
+                    defer { rotationFixPending.withLock { $0 = false } }
+                    guard device?.position == .back,
+                          let video = videoOutput.connection(with: .video),
+                          !video.isVideoMirrored,
+                          video.videoRotationAngle != 90,
+                          video.isVideoRotationAngleSupported(90) else { return }
+                    Log.camera.error("preview: back connection at angle=\(Double(angle), privacy: .public); restoring 90")
+                    video.videoRotationAngle = 90
                 }
             }
         }
@@ -1083,13 +1091,20 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     }
 
     /// Crops the square front sensor to portrait (3:4) or landscape (4:3).
-    private func applySelfieAspect() {
+    private func applySelfieAspect(correcting: Bool = false) {
         let wantsLandscape = expectsLandscapeFrames
-        expectsLandscapeFramesCached.withLock { $0 = wantsLandscape }
-        guard let device, CaptureFormatPicker.isSquareFront(device) else { return }
+        guard let device, CaptureFormatPicker.isSquareFront(device) else {
+            selfieShape.withLock { $0 = SelfieShapeCheck() }
+            return
+        }
         // Pick from the format's own list (keeps us independent of the type's name).
         let supported = device.activeFormat.supportedDynamicAspectRatios
-        let match = supported.first { wantsLandscape ? $0 == .ratio4x3 : $0 == .ratio3x4 }
+        // Whether 4x3 means landscape in our portrait UI depends on how the
+        // sensor is mounted; `selfieRatioSwapped` is learned from the frames.
+        let swapped = selfieRatioSwapped
+        let wantsNative4x3 = wantsLandscape != swapped
+        selfieShape.withLock { $0 = SelfieShapeCheck(active: true, expectsLandscape: wantsLandscape, afterSwap: correcting) }
+        let match = supported.first { wantsNative4x3 ? $0 == .ratio4x3 : $0 == .ratio3x4 }
         guard let ratio = match else {
             Log.camera.error("selfie: aspect \(wantsLandscape ? "4x3" : "3x4", privacy: .public) unsupported by active format")
             return
@@ -1100,14 +1115,44 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             Log.camera.error("selfie: lock failed: \(Log.describe(error), privacy: .public)")
             return
         }
-        device.setDynamicAspectRatio(ratio) { _, error in
+        device.setDynamicAspectRatio(ratio) { [weak self] _, error in
             if let error {
                 Log.camera.error("selfie: setDynamicAspectRatio failed: \(Log.describe(error), privacy: .public)")
             } else {
-                Log.camera.info("selfie: aspect \(wantsLandscape ? "landscape 4x3" : "portrait 3x4", privacy: .public)")
+                Log.camera.info("selfie: aspect \(wantsLandscape ? "landscape" : "portrait", privacy: .public) via \(wantsNative4x3 ? "4x3" : "3x4", privacy: .public) (swapped=\(swapped, privacy: .public))")
+                // Start checking the frame shape once the new crop has had
+                // a moment to reach the video output.
+                self?.selfieShape.withLock { $0.settledAt = CFAbsoluteTimeGetCurrent() + 0.35 }
             }
         }
         device.unlockForConfiguration()
+    }
+
+    /// Frames from the square front camera have the wrong shape for the
+    /// requested orientation: the ratio naming is the other way round on this
+    /// sensor. Swap it (once per request, remembered) and re-apply.
+    private func checkSelfieShape(landscape: Bool, square: Bool) {
+        guard !square else { return }
+        let mismatch = selfieShape.withLock { check -> Bool? in
+            guard check.active, let settled = check.settledAt,
+                  CFAbsoluteTimeGetCurrent() > settled,
+                  landscape != check.expectsLandscape else { return nil }
+            check.settledAt = nil   // one correction per request
+            return check.afterSwap
+        }
+        guard let afterSwap = mismatch else { return }
+        sessionQueue.async { [self] in
+            selfieRatioSwapped.toggle()
+            if afterSwap {
+                // Neither naming changed the frame shape: undo and stop.
+                Log.camera.error("selfie: frames stay \(landscape ? "landscape" : "portrait", privacy: .public) with either ratio; reverting swap -> swapped=\(self.selfieRatioSwapped, privacy: .public)")
+                applySelfieAspect(correcting: true)
+                selfieShape.withLock { $0.active = false }
+            } else {
+                Log.camera.error("selfie: frames \(landscape ? "landscape" : "portrait", privacy: .public) but wanted the other; swapping ratio naming -> swapped=\(self.selfieRatioSwapped, privacy: .public)")
+                applySelfieAspect(correcting: true)
+            }
+        }
     }
 
     // MARK: - Flash
@@ -1407,6 +1452,16 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             connection.isVideoMirrored = device.position == .front
         }
     }
+}
+
+/// What the square front camera's frames should look like, and when to
+/// start checking (nil: not yet settled, or already corrected).
+struct SelfieShapeCheck: Sendable {
+    var active = false
+    var expectsLandscape = false
+    var settledAt: CFAbsoluteTime?
+    /// This request already swapped the naming; a second mismatch reverts.
+    var afterSwap = false
 }
 
 // MARK: - Small helpers
