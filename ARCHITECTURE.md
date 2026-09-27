@@ -145,7 +145,10 @@ Hero transition: both sides use `.matchedGeometryEffect(id: "photo-hero", in: na
 
 ### Host — `Unproc/App`, `Unproc/CaptureExtension`, `Unproc/Widgets`, `Unproc/Intents`
 - `UnprocCaptureIntent: CameraCaptureIntent`, `AppContext = CaptureSettings`.
-- App: imports pending lock-screen captures (`LockedCaptureImporter`, app-only),
-  pushes settings into the intent app context, disables idle timer.
+- App: imports pending lock-screen captures (`LockedCaptureImporter`, app-only;
+  pure scan/release rules in `LockedCaptureScan`) at launch, on every scene
+  activation and on `sessionContentUpdates`; deletes a file only after Photos
+  confirmed it, and invalidates a session only when nothing is left, the app is
+  in the foreground and the session has been idle for `quietPeriod`. Pushes settings into the intent app context, disables idle timer.
 - Extension: `LockedCameraCaptureExtension` → `CameraScreen` with `SessionContentSink`/`SessionPhotoStore`.
 - Widgets: `ControlWidget` button running `UnprocCaptureIntent`.

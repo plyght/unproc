@@ -74,7 +74,11 @@ final class ShutterCoordinator {
         log.notice("shutter: press #\(seq, privacy: .public) queue=\(self.inFlight, privacy: .public) output=\(String(describing: output), privacy: .public) look=\(look.id, privacy: .public) ratio=\(String(describing: ratio), privacy: .public) double=\(settings.doubleExposure, privacy: .public) awaitingSecond=\(self.awaitingSecondExposure, privacy: .public)")
 
         let previous = tail
+        // Ask for time to finish if we're backgrounded / the lock-screen
+        // extension is dismissed mid-shot, so the photo still gets written.
+        let activity = ExpiringActivity.begin("unproc shot #\(seq)")
         let task = Task { @MainActor [weak self] in
+            defer { activity.end() }
             guard let self else { return }
             await self.process(seq: seq, output: output, look: look, ratio: ratio, after: previous)
             self.inFlight -= 1

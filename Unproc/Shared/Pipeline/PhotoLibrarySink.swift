@@ -91,21 +91,44 @@ final class PhotoLibrarySink: CaptureSink {
         throw UnprocError.saveFailed(message)
     }
 
-    private static func create(photo: URL, raw: URL?, date: Date) async throws -> String {
+    /// Saves a lone DNG as its own asset. Used for a lock-screen shot whose
+    /// JPEG never got written (extension ended mid-save), so the shot isn't lost.
+    func saveRAWOnly(_ dng: Data, capturedAt: Date) async throws -> PhotoItem.ID {
+        try await Self.ensureAuthorized()
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("unproc-save-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appendingPathComponent(Self.baseName(for: capturedAt) + ".DNG")
+        do {
+            try dng.write(to: url, options: .atomic)
+            let id = try await Self.create(photo: url, raw: nil, date: capturedAt, photoType: Self.rawType)
+            Log.save.notice("save: ok (DNG only) \(id, privacy: .public)")
+            return id
+        } catch {
+            Log.save.error("save: DNG-only rejected: \(Log.describe(error), privacy: .public)")
+            throw UnprocError.saveFailed(Log.describe(error))
+        }
+    }
+
+    private static let rawType = "com.adobe.raw-image"
+
+    private static func create(photo: URL, raw: URL?, date: Date, photoType: String = UTType.jpeg.identifier) async throws -> String {
         let result = IdentifierBox()
+        let rawType = Self.rawType
         try await PHPhotoLibrary.shared().performChanges {
             let request = PHAssetCreationRequest.forAsset()
             request.creationDate = date
 
             let photoOptions = PHAssetResourceCreationOptions()
             photoOptions.originalFilename = photo.lastPathComponent.replacingOccurrences(of: "_clean", with: "")
-            photoOptions.uniformTypeIdentifier = UTType.jpeg.identifier
+            photoOptions.uniformTypeIdentifier = photoType
             request.addResource(with: .photo, fileURL: photo, options: photoOptions)
 
             if let raw {
                 let rawOptions = PHAssetResourceCreationOptions()
                 rawOptions.originalFilename = raw.lastPathComponent
-                rawOptions.uniformTypeIdentifier = "com.adobe.raw-image"
+                rawOptions.uniformTypeIdentifier = rawType
                 request.addResource(with: .alternatePhoto, fileURL: raw, options: rawOptions)
             }
             result.set(request.placeholderForCreatedAsset?.localIdentifier)

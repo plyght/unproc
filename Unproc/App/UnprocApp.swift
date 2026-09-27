@@ -59,13 +59,13 @@ struct UnprocApp: App {
             // Opened from the lock-screen capture extension after unlocking.
             .onContinueUserActivity(NSUserActivityTypeLockedCameraCapture) { _ in
                 Log.lockscreen.notice("app: continued locked-camera-capture activity")
-                LockedCaptureImporter.importPending()
+                LockedCaptureImporter.importPending(reason: "opened from lock screen")
             }
         }
         .onChange(of: scenePhase) { old, phase in
             Log.app.notice("app: scenePhase \(String(describing: old), privacy: .public) -> \(String(describing: phase), privacy: .public)")
             if phase == .active {
-                LockedCaptureImporter.importPending()
+                LockedCaptureImporter.importPending(reason: "scene active")
             }
         }
     }
@@ -90,6 +90,6 @@ struct UnprocApp: App {
         let store = self.store
         importer.onImport = { await store.reload() }
         importer.startObserving()
-        importer.importPending()
+        importer.importPending(reason: "launch")
     }
 }

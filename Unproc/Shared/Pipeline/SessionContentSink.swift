@@ -4,9 +4,10 @@ import os
 /// Lock-screen sink: writes into the capture extension's session content
 /// directory, which the app imports into Photos after unlock.
 ///
-/// Files: `<yyyyMMdd-HHmmss-SSS>.dng` (if any) first, then `.jpg`, both
-/// written atomically, so a `.jpg` on disk always means a complete shot and
-/// its DNG (if any) is already there. Returns the JPEG's path as the item id.
+/// Files: `<yyyyMMdd-HHmmss-SSS>-<uuid8>.dng` (if any) first, then `.jpg`,
+/// both written atomically (temp file + rename), so a `.jpg` on disk always
+/// means a complete shot and its DNG (if any) is already there. Returns the
+/// JPEG's path as the item id.
 final class SessionContentSink: CaptureSink {
     let root: URL
 
@@ -24,6 +25,12 @@ final class SessionContentSink: CaptureSink {
     private static func write(_ photo: DevelopedPhoto, into root: URL) throws -> PhotoItem.ID {
         let fm = FileManager.default
         Log.save.info("session sink: write jpeg=\(photo.jpeg.count, privacy: .public)B dng=\(photo.dng?.count ?? 0, privacy: .public)B into \(root.path, privacy: .public)")
+        if !fm.fileExists(atPath: root.path) {
+            // The session directory is created by the system. If it's gone,
+            // the app may have released (invalidated) it; a shot written into
+            // a re-created folder is never reported to the app, so say so loudly.
+            Log.save.notice("session sink: content folder missing, re-creating \(root.path, privacy: .public)")
+        }
         do {
             try fm.createDirectory(at: root, withIntermediateDirectories: true)
         } catch {
@@ -31,17 +38,13 @@ final class SessionContentSink: CaptureSink {
             throw UnprocError.saveFailed("Could not create folder: \(error.localizedDescription)")
         }
 
-        // Never overwrite an earlier shot: suffix on (very unlikely) collision.
-        let stem = baseName(for: photo.capturedAt)
-        var name = stem
-        var n = 1
+        // Unique per shot: two shots in the same millisecond (or two presses
+        // saving concurrently) must never overwrite each other.
+        var name = fileStem(for: photo.capturedAt)
         while fm.fileExists(atPath: root.appendingPathComponent(name + ".jpg").path)
                 || fm.fileExists(atPath: root.appendingPathComponent(name + ".dng").path) {
-            name = "\(stem)-\(n)"
-            n += 1
-        }
-        if name != stem {
-            Log.save.notice("session sink: name collision, using \(name, privacy: .public)")
+            Log.save.notice("session sink: name collision on \(name, privacy: .public)")
+            name = fileStem(for: photo.capturedAt)
         }
 
         let jpgURL = root.appendingPathComponent(name + ".jpg")
@@ -51,8 +54,9 @@ final class SessionContentSink: CaptureSink {
                 try dng.write(to: dngURL, options: .atomic)
                 Log.save.info("session sink: wrote \(dngURL.lastPathComponent, privacy: .public) \(dng.count, privacy: .public)B")
             } catch {
-                Log.save.error("session sink: DNG write failed \(dngURL.path, privacy: .public): \(Log.describe(error), privacy: .public)")
-                throw UnprocError.saveFailed("DNG: \(error.localizedDescription)")
+                // Keep going: the JPEG is the photo; losing it over the RAW would be worse.
+                Log.save.error("session sink: DNG write failed, saving JPEG only \(dngURL.path, privacy: .public): \(Log.describe(error), privacy: .public)")
+                try? fm.removeItem(at: dngURL)
             }
         }
         do {
@@ -69,6 +73,13 @@ final class SessionContentSink: CaptureSink {
         }
         Log.save.notice("session sink: wrote \(jpgURL.path, privacy: .public) \(photo.jpeg.count, privacy: .public)B")
         return jpgURL.path
+    }
+
+    /// `<yyyyMMdd-HHmmss-SSS>-<8 hex>`: sorts by time, parses back to the
+    /// capture date (first 19 characters), and is unique per shot.
+    static func fileStem(for date: Date) -> String {
+        let tag = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8).lowercased()
+        return baseName(for: date) + "-" + tag
     }
 
     static func baseName(for date: Date) -> String {
