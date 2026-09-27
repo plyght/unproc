@@ -105,6 +105,8 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     private let rotationFixPending = Mutex(false)
     /// Square front camera frame-shape check (video queue ↔ session queue).
     private let selfieShape = Mutex(SelfieShapeCheck())
+    /// Physical hold (gravity) for photo orientation.
+    private let hold = HoldOrientation()
     /// The square front sensor's 4x3/3x4 naming is swapped relative to our
     /// portrait UI (learned from frames, remembered across launches).
     private var selfieRatioSwapped: Bool {
@@ -187,6 +189,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             let began = clock.now
             Log.camera.notice("session: start lens=\(lens.id, privacy: .public) flavor=\(flavor.rawValue, privacy: .public) configured=\(self.configured, privacy: .public) hasDevice=\(self.device != nil, privacy: .public) running=\(self.session.isRunning, privacy: .public)")
             wantsRunning = true
+            hold.start()
             if !configured {
                 configureOutputs()
             }
@@ -222,6 +225,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     func stop() {
         Log.camera.notice("session: stop requested")
         tracker.stop()
+        hold.stop()
         sessionQueue.async { [self] in
             wantsRunning = false
             if session.isRunning {
@@ -1440,13 +1444,23 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             coordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
             rotationCoordinators[device.uniqueID] = coordinator
         }
-        let angle = coordinator.videoRotationAngleForHorizonLevelCapture
+        let coordinatorAngle = coordinator.videoRotationAngleForHorizonLevelCapture
+        // Portrait unless the phone is clearly held sideways: the UI never
+        // rotates, so a stale or flat-phone coordinator reading used to turn
+        // ordinary portrait shots sideways.
+        let portraitAngle: CGFloat = device.position == .front ? frontPortraitAngle(for: device) : 90
+        let held = hold.current
+        let angle: CGFloat
+        switch held {
+        case .portrait: angle = portraitAngle
+        case .landscape, .unknown: angle = coordinatorAngle
+        }
         if connection.isVideoRotationAngleSupported(angle) {
             connection.videoRotationAngle = angle
         } else {
             Log.capture.notice("capture: rotation angle \(Double(angle), privacy: .public) unsupported")
         }
-        Log.capture.debug("capture: rotation angle \(Double(angle), privacy: .public)")
+        Log.capture.notice("capture: rotation angle \(Double(angle), privacy: .public) hold=\(held.rawValue, privacy: .public) coordinator=\(Double(coordinatorAngle), privacy: .public) portrait=\(Double(portraitAngle), privacy: .public)")
         if connection.isVideoMirroringSupported {
             connection.automaticallyAdjustsVideoMirroring = false
             connection.isVideoMirrored = device.position == .front

@@ -369,7 +369,6 @@ struct CameraScreen: View {
                 } else if camera.supportsSelfieOrientation && camera.currentLens?.isFront == true {
                     selfieOrientationButton
                 }
-                openAppButton
             }
             .padding(8)   // buttons carry 4pt of invisible tap margin: glass stays 12pt from the edge
             .animation(Theme.snappy, value: camera.currentLens?.id)
@@ -497,23 +496,6 @@ struct CameraScreen: View {
         .buttonStyle(.pressable)
         .accessibilityLabel(landscape ? "Portrait selfie" : "Landscape selfie")
         .accessibilityIdentifier("selfieOrientationButton")
-    }
-
-    @ViewBuilder
-    private var openAppButton: some View {
-        if hooks.isLockedCapture, let openFullApp = hooks.openFullApp {
-            Button {
-                openFullApp()
-            } label: {
-                Text("OPEN UNPROC")
-                    .monoLabel(9, weight: .semibold, color: Theme.primary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .glassEffect(.regular.interactive(), in: .capsule)
-                    .padding(4)
-            }
-            .buttonStyle(.pressable)
-        }
     }
 
     // MARK: - Pinch to zoom

@@ -1,3 +1,4 @@
+import AVFoundation
 import CoreImage
 import ImageIO
 import XCTest
@@ -252,5 +253,38 @@ final class JPEGPipelineTests: XCTestCase {
         let photo = try developer.finish(small, look: LookLibrary.all[1], frame: f, includeDNG: true)
         XCTAssertEqual(photo.dng, dng)
         try assertCleanJPEG(photo.jpeg, width: Int(rect.width), height: Int(rect.height))
+    }
+
+    // MARK: RAW crop measured from the DNG's focal length
+
+    private func rawFrame(crop: CGFloat, zoom: CGFloat, focal35: Double?, front: Bool = false) -> CapturedFrame {
+        var metadata: [String: Any] = [:]
+        if let focal35 {
+            metadata[kCGImagePropertyExifDictionary as String] = [kCGImagePropertyExifFocalLenIn35mmFilm as String: focal35]
+        }
+        return CapturedFrame(rawDNG: Data([0]), rawFlavor: .proRAW, processed: nil, metadata: metadata,
+                             lens: TestSupport.lens(position: front ? .front : .back, crop: crop, zoom: zoom),
+                             exposureDuration: nil, iso: nil, capturedAt: Date())
+    }
+
+    func testRawCropSkipsWhenCameraAlreadyZoomed() {
+        // 1× stop, but the RAW came from the ultra-wide with the zoom already applied (macro switch).
+        XCTAssertEqual(Developer.rawCrop(for: rawFrame(crop: 2, zoom: 1, focal35: 24)), 1)
+        // 2× stop, RAW already at 48mm.
+        XCTAssertEqual(Developer.rawCrop(for: rawFrame(crop: 2, zoom: 2, focal35: 48)), 1)
+    }
+
+    func testRawCropAppliesWhenRAWIsFullSensor() {
+        // 2× on the wide, RAW at the wide's native 24mm: crop the model's exact 2.
+        XCTAssertEqual(Developer.rawCrop(for: rawFrame(crop: 2, zoom: 2, focal35: 24)), 2)
+        // Older phones (26mm main) still land on the model value.
+        XCTAssertEqual(Developer.rawCrop(for: rawFrame(crop: 2, zoom: 2, focal35: 26)), 2)
+        // 1× from the ultra-wide at its native 13mm: crop ≈ 2 (the model's value).
+        XCTAssertEqual(Developer.rawCrop(for: rawFrame(crop: 2, zoom: 1, focal35: 13)), 2)
+    }
+
+    func testRawCropFallsBackWithoutFocalOrOnFront() {
+        XCTAssertEqual(Developer.rawCrop(for: rawFrame(crop: 2, zoom: 2, focal35: nil)), 2)
+        XCTAssertEqual(Developer.rawCrop(for: rawFrame(crop: 1, zoom: 1, focal35: 30, front: true)), 1)
     }
 }

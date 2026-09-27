@@ -46,6 +46,38 @@ final class Developer: @unchecked Sendable {
 
     // MARK: - Develop
 
+    /// 35mm-equivalent focal length of the 1× lens (iPhone main camera).
+    static let oneXFocal35: Double = 24
+
+    /// How much to centre-crop a RAW frame so it matches the framing the user
+    /// chose. Whether the camera already applied digital zoom to the RAW
+    /// depends on the device and constituent (ProRAW from the virtual camera
+    /// usually carries it; Bayer never does), so measure instead of assuming:
+    /// the DNG's 35mm focal length says what field of view it actually has.
+    static func rawCrop(for frame: CapturedFrame) -> CGFloat {
+        let wanted = frame.lens.crop
+        let exif = frame.metadata[kCGImagePropertyExifDictionary as String] as? [String: Any]
+        guard !frame.lens.isFront,
+              let f35 = (exif?[kCGImagePropertyExifFocalLenIn35mmFilm as String] as? NSNumber)?.doubleValue,
+              f35 > 1 else {
+            Log.pipeline.info("develop: raw crop \(Double(wanted), privacy: .public) (no 35mm focal to verify)")
+            return wanted
+        }
+        // Field of view still to remove, relative to the framing asked for.
+        let needed = CGFloat(Double(frame.lens.zoom) * oneXFocal35 / f35)
+        let crop: CGFloat
+        if needed < 1.06 {
+            crop = 1                                  // already framed (camera applied the zoom)
+        } else if abs(log(needed / max(wanted, 1))) < log(1.2) {
+            crop = max(wanted, 1)                     // agrees with the lens model: use the exact value
+        } else {
+            crop = min(needed, 16)
+        }
+        let ratio = (exif?[kCGImagePropertyExifDigitalZoomRatio as String] as? NSNumber)?.doubleValue ?? 0
+        Log.pipeline.notice("develop: raw crop \(Double(crop), privacy: .public) (lens zoom=\(Double(frame.lens.zoom), privacy: .public) modelCrop=\(Double(wanted), privacy: .public) dngFocal35=\(f35, privacy: .public) needed=\(Double(needed), privacy: .public) digitalZoom=\(ratio, privacy: .public))")
+        return crop
+    }
+
     /// Develops the frame into an upright, lens-cropped image in the working
     /// space with extent origin at (0, 0). No look is applied yet.
     func develop(_ frame: CapturedFrame) throws -> CIImage {
@@ -81,7 +113,7 @@ final class Developer: @unchecked Sendable {
         // always full-sensor, so it needs the crop; a processed photo already
         // carries the device's digital zoom (and demo frames are pre-cropped),
         // so cropping it again would zoom twice.
-        let crop = frame.rawDNG != nil ? frame.lens.crop : 1
+        let crop = frame.rawDNG != nil ? Self.rawCrop(for: frame) : 1
         if crop > 1.001 {
             let w = (extent.width / crop).rounded(.down)
             let h = (extent.height / crop).rounded(.down)
