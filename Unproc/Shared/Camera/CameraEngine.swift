@@ -229,7 +229,10 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
 
     // MARK: - Lens / format
 
-    func select(_ lens: Lens, intent: CameraIntent) async -> CameraSelectOutcome {
+    /// Makes `lens` active. Lenses on the active device (every back stop on a
+    /// virtual camera) only change `videoZoomFactor` — ramped smoothly when
+    /// `animated`, set directly otherwise (continuous scrubbing).
+    func select(_ lens: Lens, intent: CameraIntent, animated: Bool = true) async -> CameraSelectOutcome {
         await onSessionQueue { [self] () -> CameraSelectOutcome in
             guard configured, device != nil else {
                 Log.camera.info("lens: select \(lens.id, privacy: .public) before configuration; deferred to start")
@@ -239,19 +242,20 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             let fromID = self.lens?.id ?? "nil"
             let clock = ContinuousClock()
             let began = clock.now
-            Log.camera.info("lens: switch \(fromID, privacy: .public) -> \(lens.id, privacy: .public) mode=\(sameDevice ? "crop" : "device", privacy: .public) crop=\(Double(lens.crop), privacy: .public)")
+            Log.camera.info("lens: switch \(fromID, privacy: .public) -> \(lens.id, privacy: .public) mode=\(sameDevice ? "zoom" : "device", privacy: .public) crop=\(Double(lens.crop), privacy: .public) animated=\(animated, privacy: .public)")
             do {
-                try switchTo(lens)
+                try switchTo(lens, animated: animated)
             } catch {
                 Log.camera.error("lens: switch \(fromID, privacy: .public) -> \(lens.id, privacy: .public) failed: \(Log.describe(error), privacy: .public)")
                 return .failed(error.localizedDescription)
             }
             let ms = CameraLogText.ms(clock.now - began)
-            Log.camera.info("lens: switched to \(lens.id, privacy: .public) mode=\(sameDevice ? "crop" : "device", privacy: .public) in \(ms, privacy: .public)ms")
+            Log.camera.info("lens: switched to \(lens.id, privacy: .public) mode=\(sameDevice ? "zoom" : "device", privacy: .public) in \(ms, privacy: .public)ms")
             if !sameDevice {
                 applyIntent(intent)
             } else {
-                // Only the crop changed: keep everything, but re-centre AF/AE on the new framing.
+                // Only the zoom changed (no session work): keep everything, but
+                // re-centre AF/AE on the new framing.
                 pointOfInterest(intent.point ?? ViewfinderGeometry.centre, focusMode: .continuousAutoFocus, meter: true)
             }
             guard let active = self.lens, let device else {
@@ -299,11 +303,14 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         Log.camera.info("session: outputs configured preset=\(self.session.sessionPreset.rawValue, privacy: .public) outputs=\(self.session.outputs.count, privacy: .public) supportsControls=\(self.session.supportsControls, privacy: .public)")
     }
 
-    /// Makes `lens` active. Same physical device → only the zoom changes (fast).
-    private func switchTo(_ lens: Lens) throws {
+    /// Makes `lens` active. Same device (any two back stops on a virtual
+    /// camera, or a crop of a physical one) → only the zoom changes, no
+    /// session reconfiguration. A different device (back ↔ front, or physical
+    /// lenses on single-camera phones) swaps the input.
+    private func switchTo(_ lens: Lens, animated: Bool = false) throws {
         if let device, device.uniqueID == lens.deviceID, input != nil {
-            Log.camera.debug("lens: same-device crop \(lens.id, privacy: .public) crop=\(Double(lens.crop), privacy: .public)")
-            setZoom(lens.crop, on: device)
+            Log.camera.debug("lens: same-device zoom \(lens.id, privacy: .public) factor=\(Double(lens.crop), privacy: .public) animated=\(animated, privacy: .public)")
+            setZoom(lens.crop, on: device, animated: animated)
             self.lens = lens
             return
         }
@@ -384,6 +391,9 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             configurePhotoOutput()
         }
 
+        if newDevice.isVirtualDevice {
+            configureConstituentSwitching(newDevice)
+        }
         if rotationCoordinators[newDevice.uniqueID] == nil {
             rotationCoordinators[newDevice.uniqueID] = AVCaptureDevice.RotationCoordinator(device: newDevice, previewLayer: nil)
         }
@@ -474,13 +484,45 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         }
     }
 
+    /// Lets the virtual camera pick its physical constituent freely (like the
+    /// Camera app: e.g. wide + digital zoom instead of tele in low light or
+    /// close up).
+    private func configureConstituentSwitching(_ device: AVCaptureDevice) {
+        let before = device.primaryConstituentDeviceSwitchingBehavior
+        guard before != .unsupported else {
+            Log.camera.notice("virtual: constituent switching unsupported on \(device.deviceType.rawValue, privacy: .public)")
+            return
+        }
+        do {
+            try device.lockForConfiguration()
+        } catch {
+            Log.camera.error("virtual: lock failed setting constituent switching: \(Log.describe(error), privacy: .public)")
+            return
+        }
+        device.setPrimaryConstituentDeviceSwitchingBehavior(.auto, restrictedSwitchingBehaviorConditions: [])
+        device.unlockForConfiguration()
+        let constituents = device.constituentDevices.map(\.deviceType.rawValue).joined(separator: ",")
+        let switchOver = device.virtualDeviceSwitchOverVideoZoomFactors.map { String(format: "%.2f", $0.doubleValue) }.joined(separator: ",")
+        Log.camera.notice("virtual: constituent switching \(String(describing: before.rawValue), privacy: .public) -> \(String(describing: device.primaryConstituentDeviceSwitchingBehavior.rawValue), privacy: .public) (active \(String(describing: device.activePrimaryConstituentDeviceSwitchingBehavior.rawValue), privacy: .public)) constituents=[\(constituents, privacy: .public)] switchOver=[\(switchOver, privacy: .public)]")
+    }
+
     private func configurePhotoOutput() {
         guard let device else { return }
         session.beginConfiguration()
         photoOutput.maxPhotoQualityPrioritization = .balanced
-        let wantProRAW = rawFlavor == .proRAW && photoOutput.isAppleProRAWSupported
+        // A virtual camera has no Bayer RAW: ProRAW is its only RAW, so it is
+        // always on there, whatever the flavour setting.
+        let virtualNeedsProRAW = device.isVirtualDevice
+        let wantProRAW = (rawFlavor == .proRAW || virtualNeedsProRAW) && photoOutput.isAppleProRAWSupported
         photoOutput.isAppleProRAWEnabled = wantProRAW
         session.commitConfiguration()
+        if virtualNeedsProRAW {
+            if wantProRAW {
+                Log.camera.notice("photo output: virtual device \(device.deviceType.rawValue, privacy: .public): ProRAW enabled (no Bayer RAW on virtual cameras; flavor=\(self.rawFlavor.rawValue, privacy: .public))")
+            } else {
+                Log.camera.error("photo output: virtual device \(device.deviceType.rawValue, privacy: .public) without ProRAW support: captures will be processed")
+            }
+        }
 
         // Bayer requested but unavailable: fall back to ProRAW when possible.
         if !wantProRAW,
@@ -505,18 +547,71 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         }
     }
 
-    private func setZoom(_ crop: CGFloat, on device: AVCaptureDevice) {
-        let upper = max(device.activeFormat.videoMaxZoomFactor, 1)
-        let zoom = CameraMath.clamp(crop, max(device.minAvailableVideoZoomFactor, 1), upper)
+    /// Zoom-ramp speed in doublings per second (the Camera app's lens buttons
+    /// feel about this quick).
+    private static let zoomRampRate: Float = 10
+
+    /// Sets `videoZoomFactor` (clamped to what the device can do now), ramping
+    /// there when `animated`.
+    private func setZoom(_ factor: CGFloat, on device: AVCaptureDevice, animated: Bool = false) {
+        let lower = max(device.minAvailableVideoZoomFactor, 1)
+        let upper = max(min(device.activeFormat.videoMaxZoomFactor, device.maxAvailableVideoZoomFactor), lower)
+        let zoom = CameraMath.clamp(factor, lower, upper)
         do {
             try device.lockForConfiguration()
         } catch {
             Log.camera.error("zoom: lock failed: \(Log.describe(error), privacy: .public)")
             return
         }
-        Log.camera.debug("zoom: videoZoomFactor requested=\(Double(crop), privacy: .public) applied=\(Double(zoom), privacy: .public) max=\(Double(upper), privacy: .public)")
-        device.videoZoomFactor = zoom
+        Log.camera.debug("zoom: videoZoomFactor requested=\(Double(factor), privacy: .public) applied=\(Double(zoom), privacy: .public) range=\(Double(lower), privacy: .public)-\(Double(upper), privacy: .public) from=\(Double(device.videoZoomFactor), privacy: .public) animated=\(animated, privacy: .public)")
+        device.cancelVideoZoomRamp()
+        if animated {
+            device.ramp(toVideoZoomFactor: zoom, withRate: Self.zoomRampRate)
+        } else {
+            device.videoZoomFactor = zoom
+        }
         device.unlockForConfiguration()
+    }
+
+    /// Crop still to apply to a RAW frame from `device`.
+    ///
+    /// A virtual camera's RAW comes from the active constituent at its native
+    /// field of view (digital zoom isn't applied), so the residual is the
+    /// virtual zoom divided by the zoom at which that constituent takes over
+    /// (widest = 1, then the switch-over factors). Physical devices: the
+    /// lens's crop (= its `videoZoomFactor`) already is the residual.
+    private func rawResidualCrop(for lens: Lens, on device: AVCaptureDevice) -> CGFloat {
+        guard device.isVirtualDevice else { return lens.crop }
+        let zoom = device.videoZoomFactor
+        let constituents = device.constituentDevices.sorted { Self.fieldRank($0.deviceType) < Self.fieldRank($1.deviceType) }
+        let switchOver = device.virtualDeviceSwitchOverVideoZoomFactors.map { CGFloat($0.doubleValue) }
+        let active = device.activePrimaryConstituent
+        var native: CGFloat = 1
+        var activeName = "nil"
+        if let active, let index = constituents.firstIndex(where: { $0.uniqueID == active.uniqueID }) {
+            activeName = active.deviceType.rawValue
+            if index > 0, index - 1 < switchOver.count {
+                native = switchOver[index - 1]
+            }
+        } else {
+            // Unknown constituent: assume the longest one whose switch-over we've passed.
+            native = switchOver.last(where: { $0 <= zoom + 0.001 }) ?? 1
+            Log.capture.notice("capture: virtual active constituent unknown (\(active?.deviceType.rawValue ?? "nil", privacy: .public)); assuming native factor \(Double(native), privacy: .public)")
+        }
+        let residual = max(zoom / max(native, 1), 1)
+        let switchText = switchOver.map { String(format: "%.2f", Double($0)) }.joined(separator: ",")
+        Log.capture.notice("capture: virtual RAW constituent=\(activeName, privacy: .public) zoomFactor=\(Double(zoom), privacy: .public) native=\(Double(native), privacy: .public) switchOver=[\(switchText, privacy: .public)] residualCrop=\(Double(residual), privacy: .public) lens=\(lens.id, privacy: .public)")
+        return residual
+    }
+
+    /// Orders constituents widest first.
+    private static func fieldRank(_ type: AVCaptureDevice.DeviceType) -> Int {
+        switch type {
+        case .builtInUltraWideCamera: return 0
+        case .builtInWideAngleCamera: return 1
+        case .builtInTelephotoCamera: return 2
+        default: return 3
+        }
     }
 
     private func ranges(of device: AVCaptureDevice) -> CameraDeviceRanges {
@@ -1169,8 +1264,19 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
                     continuation.resume(throwing: UnprocError.cameraUnavailable)
                     return
                 }
-                let lens = self.lens ?? fallbackLens
+                let activeLens = self.lens ?? fallbackLens
                 let (settings, flavor) = makePhotoSettings()
+                // RAW from a virtual camera needs the crop left over after its
+                // constituent's native field of view; processed photos keep the
+                // lens as is (they already carry the digital zoom).
+                let lens: Lens
+                if flavor != nil, device.isVirtualDevice {
+                    let residual = rawResidualCrop(for: activeLens, on: device)
+                    lens = Lens(id: activeLens.id, deviceID: activeLens.deviceID, position: activeLens.position,
+                                kind: activeLens.kind, crop: residual, zoom: activeLens.zoom)
+                } else {
+                    lens = activeLens
+                }
                 applyCaptureOrientation(for: device)
                 let clock = ContinuousClock()
                 let began = clock.now

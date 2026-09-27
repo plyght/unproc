@@ -3,7 +3,15 @@ import CoreGraphics
 import CoreMedia
 import os
 
-/// Builds the lens list from the *physical* cameras (no virtual-device fusion).
+/// Builds the lens list.
+///
+/// Back lenses run on the best *virtual* back camera (triple, dual-wide or
+/// dual) when the phone has one: every back stop shares that one device and
+/// differs only in `videoZoomFactor` (`Lens.crop`), so switching 0.5× ↔ 1× ↔
+/// 4× is a zoom change — AVFoundation moves between the physical constituents
+/// itself, like the Camera app — instead of a session reconfiguration.
+/// Single-camera phones use the physical camera (with a 2× crop). The front
+/// camera is always its own physical device.
 enum LensDiscovery {
     /// Zoom factors relative to the main wide lens.
     struct ZoomFactors: Equatable, Sendable {
@@ -34,26 +42,34 @@ enum LensDiscovery {
 
         let zoom = zoomFactors(wide: wide, tele: tele)
         Log.camera.info("lenses: zoom factors ultraWide=\(Double(zoom.ultraWide), privacy: .public) tele=\(Double(zoom.tele), privacy: .public)")
+        let virtual = virtualBackCamera(zoom: zoom)
         var backLenses: [Lens] = []
 
+        /// Physical lens (device + crop on it) or, when its camera is a
+        /// constituent of the virtual device, the virtual device at
+        /// `displayZoom / baseZoom`.
+        func lens(_ id: String, _ physical: AVCaptureDevice, kind: Lens.Kind, crop: CGFloat, displayZoom: CGFloat) -> Lens {
+            if let virtual, virtual.constituentTypes.contains(physical.deviceType) {
+                return Lens(id: id, deviceID: virtual.device.uniqueID, position: .back,
+                            kind: kind, crop: displayZoom / virtual.baseZoom, zoom: displayZoom)
+            }
+            return Lens(id: id, deviceID: physical.uniqueID, position: .back,
+                        kind: kind, crop: crop, zoom: displayZoom)
+        }
+
         if let ultra {
-            backLenses.append(Lens(id: "back.ultra", deviceID: ultra.uniqueID, position: .back,
-                                   kind: .ultraWide, crop: 1, zoom: zoom.ultraWide))
+            backLenses.append(lens("back.ultra", ultra, kind: .ultraWide, crop: 1, displayZoom: zoom.ultraWide))
         }
         if let wide {
-            backLenses.append(Lens(id: "back.wide", deviceID: wide.uniqueID, position: .back,
-                                   kind: .wide, crop: 1, zoom: 1))
+            backLenses.append(lens("back.wide", wide, kind: .wide, crop: 1, displayZoom: 1))
             // Skip the 2× crop when a real 2× (or shorter) telephoto exists: same button twice.
             if tele == nil || zoom.tele > 2.05 {
-                backLenses.append(Lens(id: "back.wide.crop2", deviceID: wide.uniqueID, position: .back,
-                                       kind: .wide, crop: 2, zoom: 2))
+                backLenses.append(lens("back.wide.crop2", wide, kind: .wide, crop: 2, displayZoom: 2))
             }
         }
         if let tele {
-            backLenses.append(Lens(id: "back.tele", deviceID: tele.uniqueID, position: .back,
-                                   kind: .tele, crop: 1, zoom: zoom.tele))
-            backLenses.append(Lens(id: "back.tele.crop2", deviceID: tele.uniqueID, position: .back,
-                                   kind: .tele, crop: 2, zoom: zoom.tele * 2))
+            backLenses.append(lens("back.tele", tele, kind: .tele, crop: 1, displayZoom: zoom.tele))
+            backLenses.append(lens("back.tele.crop2", tele, kind: .tele, crop: 2, displayZoom: zoom.tele * 2))
         }
         backLenses.sort { $0.zoom < $1.zoom }
 
@@ -64,6 +80,37 @@ enum LensDiscovery {
         let list = backLenses.map(CameraLogText.lens).joined(separator: " ")
         Log.camera.notice("lenses: \(backLenses.count, privacy: .public) [\(list, privacy: .public)]")
         return backLenses
+    }
+
+    /// The back virtual device the lenses run on, with the display zoom of its
+    /// widest constituent (`videoZoomFactor` 1 on the virtual device).
+    struct VirtualCamera {
+        let device: AVCaptureDevice
+        let constituentTypes: Set<AVCaptureDevice.DeviceType>
+        /// Display zoom at `videoZoomFactor` 1: 0.5 (ultra-wide) for triple /
+        /// dual-wide, 1 (wide) for dual.
+        let baseZoom: CGFloat
+    }
+
+    /// Best back virtual camera: triple, else dual-wide, else dual. `nil` on
+    /// single-camera phones.
+    static func virtualBackCamera(zoom: ZoomFactors) -> VirtualCamera? {
+        let candidates: [(AVCaptureDevice.DeviceType, CGFloat)] = [
+            (.builtInTripleCamera, zoom.ultraWide),
+            (.builtInDualWideCamera, zoom.ultraWide),
+            (.builtInDualCamera, 1),
+        ]
+        for (type, baseZoom) in candidates {
+            guard let device = AVCaptureDevice.default(type, for: .video, position: .back),
+                  device.isVirtualDevice, baseZoom > 0 else { continue }
+            let types = Set(device.constituentDevices.map(\.deviceType))
+            let typeText = device.constituentDevices.map(\.deviceType.rawValue).joined(separator: ",")
+            let switchOver = device.virtualDeviceSwitchOverVideoZoomFactors.map { String(format: "%.2f", $0.doubleValue) }.joined(separator: ",")
+            Log.camera.notice("lenses: virtual back camera \(type.rawValue, privacy: .public) id=\(device.uniqueID, privacy: .public) constituents=[\(typeText, privacy: .public)] switchOver=[\(switchOver, privacy: .public)] baseZoom=\(Double(baseZoom), privacy: .public)")
+            return VirtualCamera(device: device, constituentTypes: types, baseZoom: baseZoom)
+        }
+        Log.camera.notice("lenses: no back virtual camera; using physical cameras")
+        return nil
     }
 
     /// Reads the switch-over zoom factors of the virtual multi-camera devices to

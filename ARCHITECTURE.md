@@ -16,9 +16,15 @@ go through `HostHooks`. Guard Photos-writing / LockedCameraCaptureManager code
 that the extension must not use with `#if UNPROC_APP`.
 
 ## Pipeline (what "zero processing" means)
-1. `CameraController` captures **RAW** (Bayer by default, ProRAW optional) with
-   `photoQualityPrioritization = .speed` on a *physical* device (no virtual
-   device fusion). Lenses without RAW (front) fall back to a processed HEIF.
+1. `CameraController` captures **RAW** with `photoQualityPrioritization = .speed`.
+   Back lenses run on the best *virtual* back camera (triple → dual-wide →
+   dual) so lens changes are zoom ramps, not session reconfigurations; a
+   virtual camera has no Bayer RAW, so the back camera shoots **ProRAW** there.
+   **Bayer** (default flavour, ProRAW optional) is used where the device is
+   physical (single-camera phones). The frame's `lens.crop` is the residual
+   crop relative to the constituent that took the shot (RAW is delivered at
+   the constituent's native field of view). Lenses without RAW (front) fall
+   back to a processed HEIF.
 2. `Developer.develop` runs `CIRAWFilter` with: sharpness 0, local tone map 0,
    detail 0, boost ~0.5 (film-like not flat), modest luminance NR, lens
    correction on (distortion-free), no EDR. Orients, applies `lens.crop`.

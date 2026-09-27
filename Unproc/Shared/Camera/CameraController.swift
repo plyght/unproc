@@ -206,9 +206,11 @@ final class CameraController {
 
     // MARK: - Lens / format
 
-    /// Switching between lenses of the same physical camera (e.g. 1× ↔ 2× crop)
-    /// only changes the zoom; other switches reconfigure the session.
-    func select(_ lens: Lens) async {
+    /// Switching between lenses of the same device — every back stop on a
+    /// virtual camera, or a crop of a physical one — only changes the zoom
+    /// (ramped when `animated`); other switches (back ↔ front) reconfigure the
+    /// session.
+    func select(_ lens: Lens, animated: Bool = true) async {
         // Known lenses, or a continuous-zoom crop of a known physical camera.
         let known = lenses.first(where: { $0.id == lens.id })
         let zoomCrop = lenses.contains(where: { $0.deviceID == lens.deviceID && $0.position == lens.position }) ? lens : nil
@@ -225,7 +227,7 @@ final class CameraController {
             demo.setLens(target)
             return
         }
-        switch await engine.select(target, intent: makeIntent()) {
+        switch await engine.select(target, intent: makeIntent(), animated: animated) {
         case .notConfigured:
             Log.camera.info("controller: select \(target.id, privacy: .public) stored (not configured)")
             currentLens = target
@@ -249,7 +251,8 @@ final class CameraController {
         Array(Set(lenses.filter { !$0.isFront }.map(\.zoom))).sorted()
     }
 
-    /// Continuous zoom across the back cameras. Picks the longest physical lens
+    /// Continuous zoom across the back cameras. On a virtual camera this is
+    /// just its `videoZoomFactor`; otherwise it picks the longest physical lens
     /// at or below `zoom` and crops it digitally (the preview via
     /// `videoZoomFactor`, the photo via `Lens.crop` in development). Exact stops
     /// resolve to the real lens. Safe to call every frame of a drag: calls are
@@ -271,7 +274,8 @@ final class CameraController {
                 pendingZoom = nil
                 if let lens = lensForZoom(next), lens.id != currentLens?.id {
                     Log.camera.debug("zoom: \(Double(next), privacy: .public) -> lens \(lens.id, privacy: .public) crop=\(Double(lens.crop), privacy: .public)")
-                    await select(lens)
+                    // Scrubbing tracks the finger: no zoom ramp.
+                    await select(lens, animated: false)
                 }
             }
             isApplyingZoom = false
@@ -288,6 +292,20 @@ final class CameraController {
         if let exact = back.first(where: { abs($0.zoom - clamped) / $0.zoom < 0.01 }) {
             return exact
         }
+        // Virtual camera: all back stops are one device and its zoom factor is
+        // display zoom / base zoom (the same ratio for every stop).
+        let sorted = back.sorted { $0.zoom < $1.zoom }
+        if let virtualScale = Self.virtualZoomScale(sorted) {
+            let stop = sorted.last(where: { $0.zoom <= clamped }) ?? sorted[0]
+            return Lens(
+                id: String(format: "back.zoom@%.2f", clamped),
+                deviceID: stop.deviceID,
+                position: stop.position,
+                kind: stop.kind,
+                crop: max(clamped * virtualScale, 1),
+                zoom: clamped
+            )
+        }
         let physical = back.filter { $0.crop <= 1.0001 }.sorted { $0.zoom < $1.zoom }
         guard let base = physical.last(where: { $0.zoom <= clamped }) ?? physical.first else { return nil }
         let crop = max(clamped / base.zoom, 1)
@@ -299,6 +317,17 @@ final class CameraController {
             crop: crop,
             zoom: clamped
         )
+    }
+
+    /// `crop / zoom` when every back lens shares one device and that ratio
+    /// (i.e. the virtual camera's base zoom) is the same for all of them; nil
+    /// for physical lenses (which includes demo mode's per-lens crops).
+    private static func virtualZoomScale(_ back: [Lens]) -> CGFloat? {
+        guard let first = back.first, first.zoom > 0, Set(back.map(\.kind)).count > 1,
+              back.allSatisfy({ $0.deviceID == first.deviceID && $0.zoom > 0 }) else { return nil }
+        let scale = first.crop / first.zoom
+        guard back.allSatisfy({ abs($0.crop / $0.zoom - scale) <= scale * 0.01 }) else { return nil }
+        return scale
     }
 
     func setRawFlavor(_ flavor: RawFlavor) async {
