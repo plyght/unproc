@@ -1,4 +1,4 @@
-#if UNPROC_APP
+#if UNPROC_APP || UNPROC_EXTENSION
 import Foundation
 import ImageIO
 import Photos
@@ -15,11 +15,20 @@ import os
 ///   2. JPEG alone, from a file
 ///   3. JPEG re-encoded with minimal metadata (no MakerApple etc.)
 /// Every attempt and failure is logged under `Log.save`.
+///
+/// Also used by the lock-screen extension (which inherits the app's Photos
+/// permission and may save while the device is locked) with
+/// `promptForAccess: false`: an extension must never show the prompt.
 final class PhotoLibrarySink: CaptureSink {
-    init() {}
+    /// Ask for add-only access when it's undetermined (app only).
+    let promptForAccess: Bool
+
+    init(promptForAccess: Bool = true) {
+        self.promptForAccess = promptForAccess
+    }
 
     func save(_ photo: DevelopedPhoto) async throws -> PhotoItem.ID {
-        try await Self.ensureAuthorized()
+        try await Self.ensureAuthorized(prompt: promptForAccess)
 
         let stem = Self.baseName(for: photo.capturedAt)
         let folder = FileManager.default.temporaryDirectory
@@ -94,7 +103,7 @@ final class PhotoLibrarySink: CaptureSink {
     /// Saves a lone DNG as its own asset. Used for a lock-screen shot whose
     /// JPEG never got written (extension ended mid-save), so the shot isn't lost.
     func saveRAWOnly(_ dng: Data, capturedAt: Date) async throws -> PhotoItem.ID {
-        try await Self.ensureAuthorized()
+        try await Self.ensureAuthorized(prompt: promptForAccess)
         let folder = FileManager.default.temporaryDirectory
             .appendingPathComponent("unproc-save-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -158,12 +167,17 @@ final class PhotoLibrarySink: CaptureSink {
     }
 
     /// `.addOnly` is enough to save; full access (for the viewer) also satisfies it.
-    static func ensureAuthorized() async throws {
+    /// With `prompt: false`, an undetermined status fails instead of asking.
+    static func ensureAuthorized(prompt: Bool = true) async throws {
         var status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
         if status == .notDetermined {
+            guard prompt else {
+                Log.save.notice("save: photos add authorization undetermined, not prompting")
+                throw UnprocError.notAuthorized
+            }
             status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
         }
-        Log.save.info("save: photos add authorization = \(status.rawValue)")
+        Log.save.info("save: photos add authorization = \(status.rawValue, privacy: .public)")
         switch status {
         case .authorized, .limited:
             return

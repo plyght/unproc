@@ -11,9 +11,40 @@ enum LockedCaptureScan {
         let dng: URL?
     }
 
+    /// A shot the extension already saved to Photos (`.saved` marker): never
+    /// imported, only cleaned up.
+    struct SavedShot: Sendable, Equatable {
+        let marker: URL
+        /// Nil if the marker couldn't be parsed (still counts as saved:
+        /// importing it again would duplicate it).
+        let localIdentifier: String?
+        /// Its remaining image files, DNG before JPEG (delete in this order).
+        let files: [URL]
+    }
+
+    /// A shot deleted in the lock-screen viewer after it was saved to Photos
+    /// (`.deleted` marker): the app deletes the asset, then the marker.
+    struct Deletion: Sendable, Equatable {
+        let marker: URL
+        /// Nil if unreadable (nothing can be deleted; the marker is dropped).
+        let localIdentifier: String?
+        /// Everything else left for that stem (stray `.saved` marker or image
+        /// files a failed delete left behind): removed with the marker, never imported.
+        let leftovers: [URL]
+    }
+
     struct Contents: Sendable {
-        /// JPEGs that look complete (+ DNG sibling if present), oldest first.
+        /// JPEGs that look complete (+ DNG sibling if present), oldest first,
+        /// not saved to Photos yet: to be imported.
         var pairs: [Pair] = []
+        /// Complete JPEGs without a `.saved` marker younger than
+        /// `directSaveGrace`: the extension may still be saving them to Photos
+        /// itself, so importing now could duplicate them. Retried later.
+        var awaitingDirectSave: [Pair] = []
+        /// Already in Photos: skip, just clean up.
+        var saved: [SavedShot] = []
+        /// Asset deletions requested from the lock-screen viewer.
+        var deletions: [Deletion] = []
         /// JPEGs that look truncated or empty and are younger than the grace
         /// period: probably still being written, retried later.
         var pendingJPEGs: [URL] = []
@@ -25,18 +56,26 @@ enum LockedCaptureScan {
         /// directory's creation date when it's empty.
         var lastActivity: Date = .distantPast
 
-        var isEmpty: Bool { pairs.isEmpty && pendingJPEGs.isEmpty && orphanDNGs.isEmpty }
+        var isEmpty: Bool {
+            pairs.isEmpty && pendingJPEGs.isEmpty && orphanDNGs.isEmpty
+                && awaitingDirectSave.isEmpty && saved.isEmpty && deletions.isEmpty
+        }
     }
 
     /// A JPEG that doesn't look complete is only imported once it's been left
     /// alone this long (atomic writes make this unlikely; this is a backstop).
     static let suspectJPEGGrace: TimeInterval = 60
 
+    /// The extension writes the session files first and then saves to Photos
+    /// (usually well under a few seconds). A marker-less JPEG younger than this
+    /// is left alone so a shot taken right before unlocking isn't imported twice.
+    static let directSaveGrace: TimeInterval = 45
+
     // MARK: - Scanning
 
     /// Synchronous on purpose: directory enumerators can't be iterated in an
     /// async context. Returns nil if the directory can't be read.
-    static func scan(_ dir: URL, now: Date = Date()) -> Contents? {
+    static func scan(_ dir: URL, now: Date = Date(), directSaveGrace: TimeInterval = LockedCaptureScan.directSaveGrace) -> Contents? {
         let fm = FileManager.default
         let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .contentModificationDateKey, .creationDateKey, .fileSizeKey]
         var isDir: ObjCBool = false
@@ -50,6 +89,8 @@ enum LockedCaptureScan {
 
         var jpegs: [String: URL] = [:]
         var dngs: [String: URL] = [:]
+        var savedMarkers: [String: URL] = [:]
+        var deletedMarkers: [String: URL] = [:]
         var modified: [URL: Date] = [:]
         for case let file as URL in enumerator {
             let values = try? file.resourceValues(forKeys: Set(keys))
@@ -67,14 +108,49 @@ enum LockedCaptureScan {
             switch file.pathExtension.lowercased() {
             case "jpg", "jpeg": jpegs[base] = file
             case "dng": dngs[base] = file
-            default: break
+            default:
+                switch SessionMarker.kind(of: file) {
+                case .some(.saved): savedMarkers[base] = file
+                case .some(.deleted): deletedMarkers[base] = file
+                case .none: break
+                }
             }
+        }
+
+        // Deleted in the lock-screen viewer: never imported, whatever is left.
+        for base in deletedMarkers.keys.sorted() {
+            let marker = deletedMarkers[base]!
+            let leftovers = [dngs[base], jpegs[base], savedMarkers[base]].compactMap { $0 }
+            contents.deletions.append(Deletion(marker: marker,
+                                               localIdentifier: SessionMarker.read(at: marker)?.localIdentifier,
+                                               leftovers: leftovers))
+            jpegs[base] = nil
+            dngs[base] = nil
+            savedMarkers[base] = nil
+        }
+
+        // Already in Photos: never imported.
+        for base in savedMarkers.keys.sorted() {
+            let marker = savedMarkers[base]!
+            let files = [dngs[base], jpegs[base]].compactMap { $0 }
+            contents.saved.append(SavedShot(marker: marker,
+                                            localIdentifier: SessionMarker.read(at: marker)?.localIdentifier,
+                                            files: files))
+            jpegs[base] = nil
+            dngs[base] = nil
         }
 
         for base in jpegs.keys.sorted() {
             let jpeg = jpegs[base]!
             let age = now.timeIntervalSince(modified[jpeg] ?? .distantPast)
-            if isCompleteJPEG(at: jpeg) || age >= suspectJPEGGrace {
+            if isCompleteJPEG(at: jpeg) {
+                let pair = Pair(jpeg: jpeg, dng: dngs[base])
+                if age < directSaveGrace {
+                    contents.awaitingDirectSave.append(pair)
+                } else {
+                    contents.pairs.append(pair)
+                }
+            } else if age >= suspectJPEGGrace {
                 contents.pairs.append(Pair(jpeg: jpeg, dng: dngs[base]))
             } else {
                 contents.pendingJPEGs.append(jpeg)

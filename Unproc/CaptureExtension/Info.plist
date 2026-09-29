@@ -27,6 +27,8 @@
 	</dict>
 	<key>NSCameraUsageDescription</key>
 	<string>unproc needs the camera to take photos.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>unproc saves your photos (and their RAW files) to your library.</string>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

@@ -8,6 +8,12 @@ import os
 /// into its session content directories) into the Photos library, then
 /// releases those directories.
 ///
+/// Normally the extension already saved each shot to Photos itself and left a
+/// `.saved` marker (`SessionMarker`): those are skipped and only cleaned up.
+/// Importing here is the fallback for shots it couldn't save. Shots deleted in
+/// the lock-screen viewer after they reached Photos leave a `.deleted` marker;
+/// in the foreground the importer deletes those assets from the library.
+///
 /// When it runs: at launch, on every scene activation, when the app is opened
 /// from the extension, and for every `sessionContentUpdates` event while the
 /// app is alive. All entry points funnel into one per-session serial queue:
@@ -140,7 +146,10 @@ final class LockedCaptureImporter {
         }
         let withDNG = first.pairs.filter { $0.dng != nil }.count
         let active = appActive
-        Log.lockscreen.notice("import: session \(id, privacy: .public) (\(reason, privacy: .public)) photos=\(first.pairs.count, privacy: .public) withDNG=\(withDNG, privacy: .public) pendingJPEG=\(first.pendingJPEGs.count, privacy: .public) orphanDNG=\(first.orphanDNGs.count, privacy: .public) active=\(active, privacy: .public)")
+        Log.lockscreen.notice("import: session \(id, privacy: .public) (\(reason, privacy: .public)) photos=\(first.pairs.count, privacy: .public) withDNG=\(withDNG, privacy: .public) pendingJPEG=\(first.pendingJPEGs.count, privacy: .public) orphanDNG=\(first.orphanDNGs.count, privacy: .public) alreadySaved=\(first.saved.count, privacy: .public) awaitingDirectSave=\(first.awaitingDirectSave.count, privacy: .public) deletions=\(first.deletions.count, privacy: .public) active=\(active, privacy: .public)")
+        for shot in first.saved {
+            Log.lockscreen.debug("import: \(shot.marker.lastPathComponent, privacy: .public) already in Photos as \(shot.localIdentifier ?? "?", privacy: .public), skipping")
+        }
 
         var done = loadDone()
         let now = Date()
@@ -165,6 +174,11 @@ final class LockedCaptureImporter {
                 if await importOrphan(dng, session: dir, done: &done) { importedAny = true }
             }
         }
+        // Deletions requested from the lock-screen viewer (foreground only:
+        // needs full library access and shows a system confirmation).
+        if appActive, !first.deletions.isEmpty {
+            if await applyDeletions(first.deletions, session: dir) { importedAny = true }
+        }
         if importedAny { await onImport?() }
 
         // Delete what's safely in Photos (foreground only: the lock-screen
@@ -178,6 +192,8 @@ final class LockedCaptureImporter {
         let unimported = after.pairs.filter { !done.contains(LockedCaptureScan.doneKey(session: dir, file: $0.jpeg)) }.count
             + after.orphanDNGs.filter { !done.contains(LockedCaptureScan.doneKey(session: dir, file: $0)) }.count
             + after.pendingJPEGs.count
+            + after.awaitingDirectSave.count
+            + after.deletions.count
         let decision = LockedCaptureScan.release(
             unimported: unimported,
             appActive: appActive,
@@ -190,6 +206,8 @@ final class LockedCaptureImporter {
             Log.lockscreen.notice("import: keeping session \(id, privacy: .public): \(why, privacy: .public)")
             if !after.pendingJPEGs.isEmpty {
                 retry(dir, after: LockedCaptureScan.suspectJPEGGrace, why: "JPEG still being written")
+            } else if !after.awaitingDirectSave.isEmpty {
+                retry(dir, after: LockedCaptureScan.directSaveGrace, why: "extension may still be saving to Photos")
             } else if !after.orphanDNGs.isEmpty, authorized {
                 retry(dir, after: Self.orphanGrace, why: "DNG waiting for its JPEG")
             }
@@ -251,15 +269,83 @@ final class LockedCaptureImporter {
             files.append(pair.jpeg)
         }
         files += contents.orphanDNGs.filter { done.contains(LockedCaptureScan.doneKey(session: dir, file: $0)) }
+        // Saved to Photos by the extension: image files first, the marker last,
+        // so a JPEG is never left on disk without it.
+        for shot in contents.saved {
+            files += shot.files
+            files.append(shot.marker)
+        }
         for file in files where fm.fileExists(atPath: file.path) {
             do {
                 try fm.removeItem(at: file)
-                Log.lockscreen.info("import: removed imported \(file.lastPathComponent, privacy: .public)")
+                Log.lockscreen.info("import: removed \(file.lastPathComponent, privacy: .public)")
             } catch {
                 // Bookkeeping still prevents a second import.
                 Log.lockscreen.error("import: couldn't remove \(file.lastPathComponent, privacy: .public): \(Log.describe(error), privacy: .public)")
             }
         }
+    }
+
+    /// Deletes from Photos the assets the user deleted in the lock-screen
+    /// viewer, then drops their markers. A marker is dropped (logged) when full
+    /// access is denied, the user declines the system confirmation, or the
+    /// asset is already gone; kept for the next sweep on other errors.
+    /// Returns true if the library changed.
+    private func applyDeletions(_ deletions: [LockedCaptureScan.Deletion], session dir: URL) async -> Bool {
+        let id = LockedCaptureScan.sessionID(dir)
+        let ids = Array(Set(deletions.compactMap(\.localIdentifier))).sorted()
+        Log.lockscreen.notice("import: session \(id, privacy: .public) has \(deletions.count, privacy: .public) lock-screen deletion(s), \(ids.count, privacy: .public) asset id(s)")
+        var dropMarkers = true
+        var changed = false
+        if !ids.isEmpty {
+            let access = await ensureLibraryReadWrite()
+            if access == nil {
+                Log.lockscreen.notice("import: Photos access undetermined, keeping deletion markers")
+                return false
+            }
+            if access == true {
+                let found = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil).count
+                if found == 0 {
+                    Log.lockscreen.notice("import: assets to delete are already gone from Photos")
+                } else {
+                    do {
+                        Log.save.notice("delete: deleting \(found, privacy: .public) asset(s) removed on the lock screen")
+                        try await PHPhotoLibrary.shared().performChanges {
+                            let assets = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+                            PHAssetChangeRequest.deleteAssets(assets)
+                        }
+                        changed = true
+                        Log.save.notice("delete: removed \(found, privacy: .public) asset(s) from Photos")
+                    } catch {
+                        if let photosError = error as? PHPhotosError, photosError.code == .userCancelled {
+                            Log.save.notice("delete: user kept the photo(s); dropping deletion markers")
+                        } else {
+                            dropMarkers = false
+                            Log.save.error("delete: failed, keeping markers for next sweep: \(Log.describe(error), privacy: .public)")
+                        }
+                    }
+                }
+            } else {
+                Log.save.error("delete: no full Photos access; can't delete \(ids.count, privacy: .public) lock-screen deleted photo(s), dropping markers")
+            }
+        } else {
+            Log.lockscreen.error("import: deletion marker(s) without asset id, dropping")
+        }
+        guard dropMarkers else { return changed }
+        let fm = FileManager.default
+        for deletion in deletions {
+            // Leftovers first, the marker last: a stray JPEG must never
+            // outlive the marker that keeps it from being imported.
+            for file in deletion.leftovers + [deletion.marker] where fm.fileExists(atPath: file.path) {
+                do {
+                    try fm.removeItem(at: file)
+                    Log.lockscreen.info("import: removed \(file.lastPathComponent, privacy: .public)")
+                } catch {
+                    Log.lockscreen.error("import: couldn't remove \(file.lastPathComponent, privacy: .public): \(Log.describe(error), privacy: .public)")
+                }
+            }
+        }
+        return changed
     }
 
     private func invalidate(_ dir: URL) async {
@@ -297,6 +383,23 @@ final class LockedCaptureImporter {
             Log.lockscreen.error("import: no Photos access (status \(status.rawValue, privacy: .public)); keeping \(pending, privacy: .public) lock-screen photo(s) until access is granted")
             return false
         }
+    }
+
+    /// Deleting assets needs full (read-write) access. Asks only in the
+    /// foreground; nil when it's still undetermined (ask again later).
+    private func ensureLibraryReadWrite() async -> Bool? {
+        var status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        if status == .notDetermined {
+            guard appActive else {
+                Log.save.notice("delete: Photos access undetermined, waiting for foreground")
+                return nil
+            }
+            Log.save.notice("delete: requesting Photos read-write access")
+            status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+        }
+        Log.save.info("delete: Photos read-write status \(status.rawValue, privacy: .public)")
+        if status == .notDetermined { return nil }
+        return status == .authorized || status == .limited
     }
 
     private func authorizedNow() -> Bool {

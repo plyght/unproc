@@ -113,10 +113,12 @@ enum ViewfinderEffects {
     static func zebras(_ image: CIImage, threshold: Float = 0.96, phase: CGFloat = 0) -> CIImage   // diagonal stripes over clipping areas
     static func peaking(_ image: CIImage) -> CIImage   // bright accent-coloured edges over in-focus detail
 }
-#if UNPROC_APP
-final class PhotoLibrarySink: CaptureSink { init() }
+#if UNPROC_APP || UNPROC_EXTENSION
+final class PhotoLibrarySink: CaptureSink { init(promptForAccess: Bool = true) }   // extension: false (never prompts)
 #endif
-final class SessionContentSink: CaptureSink { init(root: URL) }   // writes <yyyyMMdd-HHmmss-SSS>.jpg (+ .dng)
+final class SessionContentSink: CaptureSink { init(root: URL, library: (any CaptureSink)? = nil) }
+    // writes <yyyyMMdd-HHmmss-SSS>-<id>.jpg (+ .dng), then saves to `library` (Photos) and writes <stem>.saved
+enum SessionMarker   // <stem>.saved / <stem>.deleted JSON sidecars {localIdentifier, date}, atomic
 ```
 
 ### Camera UI — `Unproc/Shared/UI/`
@@ -145,10 +147,22 @@ Hero transition: both sides use `.matchedGeometryEffect(id: "photo-hero", in: na
 
 ### Host — `Unproc/App`, `Unproc/CaptureExtension`, `Unproc/Widgets`, `Unproc/Intents`
 - `UnprocCaptureIntent: CameraCaptureIntent`, `AppContext = CaptureSettings`.
-- App: imports pending lock-screen captures (`LockedCaptureImporter`, app-only;
-  pure scan/release rules in `LockedCaptureScan`) at launch, on every scene
-  activation and on `sessionContentUpdates`; deletes a file only after Photos
-  confirmed it, and invalidates a session only when nothing is left, the app is
-  in the foreground and the session has been idle for `quietPeriod`. Pushes settings into the intent app context, disables idle timer.
 - Extension: `LockedCameraCaptureExtension` → `CameraScreen` with `SessionContentSink`/`SessionPhotoStore`.
+  Each shot goes into the session directory (the lock-screen viewer lists its
+  JPEGs) and, with the app's add-only Photos access (inherited; never prompted
+  from the extension), straight into Photos even while locked — inside the
+  shutter's `ExpiringActivity`. Success writes `<stem>.saved`; failure writes
+  nothing, so the app imports it later. Deleting an already-saved shot in the
+  lock-screen viewer (on commit, after undo is no longer possible) replaces
+  `.saved` with `<stem>.deleted`, which outlives the image files.
+- App: `LockedCaptureImporter` (app-only; pure scan/release rules in
+  `LockedCaptureScan`) runs at launch, on every scene activation and on
+  `sessionContentUpdates`. Shots with `.saved` are skipped and only cleaned up;
+  marker-less shots are imported as the fallback (after `directSaveGrace`, so an
+  in-flight direct save isn't duplicated); `.deleted` markers make it delete the
+  asset in the foreground (`PHAssetChangeRequest.deleteAssets`, read-write access
+  requested in the foreground; denied/declined → marker dropped). Files are
+  deleted only once they're in Photos, and a session is invalidated only when
+  nothing is left, the app is in the foreground and the session has been idle
+  for `quietPeriod`. Pushes settings into the intent app context, disables idle timer.
 - Widgets: `ControlWidget` button running `UnprocCaptureIntent`.

@@ -1,10 +1,13 @@
 import LockedCameraCapture
+import Photos
 import SwiftUI
 import os
 
 /// Lock-screen / Control Centre / Action Button camera. Runs while the device
-/// is locked: no Photos access, no shared defaults. Photos are written into the
-/// session content directory and imported by the app after unlock.
+/// is locked: no shared defaults. Each shot is written into the session content
+/// directory (for the lock-screen viewer) and, with the app's Photos add access
+/// (inherited by the extension), saved straight to the library. Shots that
+/// couldn't be saved directly are imported by the app after unlock.
 @main
 struct UnprocCaptureExtension: LockedCameraCaptureExtension {
     var body: some LockedCameraCaptureExtensionScene {
@@ -56,9 +59,14 @@ struct CaptureRootView: View {
             }
             let root = session.sessionContentURL
             Log.lockscreen.info("extension: session content \(root.path, privacy: .public)")
+            let addStatus = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+            let direct = addStatus == .authorized || addStatus == .limited
+            Log.lockscreen.notice("extension: Photos add status=\(addStatus.rawValue, privacy: .public) directSave=\(direct, privacy: .public)")
             parts = Parts(
                 camera: CameraController(),
-                sink: SessionContentSink(root: root),
+                // Always try: status can change while we're open, and the sink
+                // re-checks it per shot without ever prompting.
+                sink: SessionContentSink(root: root, library: PhotoLibrarySink(promptForAccess: false)),
                 store: SessionPhotoStore(root: root)
             )
         }

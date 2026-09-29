@@ -5,7 +5,8 @@ import UIKit
 import os
 
 /// Photos captured in this lock-screen session: `<yyyyMMdd-HHmmss-SSS>.jpg`
-/// (+ optional `.dng`) files in the session content directory. Newest first.
+/// (+ optional `.dng`, `.saved` / `.deleted` markers) files in the session
+/// content directory. Newest first.
 @MainActor
 @Observable
 final class SessionPhotoStore: PhotoStore {
@@ -119,6 +120,17 @@ final class SessionPhotoStore: PhotoStore {
                     }
                 }
             }
+            // Already saved to Photos by the extension? Leave a `.deleted`
+            // marker so the app deletes the asset on its next (foreground)
+            // import sweep. Only reached on a committed delete: the viewer's
+            // undo happens before `delete` is ever called.
+            do {
+                if let assetID = try SessionMarker.markDeletedIfSaved(forShot: url) {
+                    Log.lockscreen.notice("session store: \(url.lastPathComponent, privacy: .public) was in Photos (\(assetID, privacy: .public)), marked for deletion by the app")
+                }
+            } catch {
+                Log.lockscreen.error("session store: couldn't mark \(url.lastPathComponent, privacy: .public) for deletion from Photos: \(Log.describe(error), privacy: .public)")
+            }
         }
         self.items.removeAll { removed.contains($0.id) }
         let removedCount = removed.count
@@ -150,6 +162,8 @@ final class SessionPhotoStore: PhotoStore {
             urls = []
         }
         let photos: [PhotoItem] = urls.compactMap { url in
+            // Only JPEGs: DNG siblings and `.saved` / `.deleted` markers
+            // (`SessionMarker`) are never listed.
             guard url.pathExtension.lowercased() == "jpg" || url.pathExtension.lowercased() == "jpeg" else { return nil }
             let name = url.deletingPathExtension().lastPathComponent
             let created = parseDate(name)
