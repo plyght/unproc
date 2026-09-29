@@ -195,17 +195,13 @@ final class ScreenshotTests: XCTestCase {
             settle()
         }
 
-        // Back to photos, 3 s self-timer.
+        // Back to photos, 3 s self-timer (timer button: off → 3 s).
         XCTAssertTrue(tapIfPresent("mode.photo"), "no PHOTO mode switch")
         settle(1)
-        if tapIfPresent("statusBadge") {
-            settle(0.5)
-            tapIfPresent("menu.timer.3")
-            if !dismissMenu() { tapIfPresent("statusBadge") }
-            settle()
-        }
+        XCTAssertTrue(tapIfPresent("timerButton"), "no timer button")
+        settle(0.5)
         let afterVideo = photoCount()
-        XCTAssertTrue(tapIfPresent("shutter"))
+        XCTAssertTrue(tapIfPresent("shutter"), "no shutter in photo mode")
         settle(1.2)
         XCTAssertTrue(app.descendants(matching: .any)["countdown"].exists, "no countdown on screen")
         snap("23-timer")
