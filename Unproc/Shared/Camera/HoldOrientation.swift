@@ -23,8 +23,15 @@ final class HoldOrientation: @unchecked Sendable {
         return q
     }()
     private let state = Mutex(Hold.unknown)
+    /// Last reading was a real upright hold (not flat, not inferred).
+    private let upright = Mutex(false)
 
     var current: Hold { state.withLock { $0 } }
+    /// The phone is visibly held upright right now (gravity mostly along -y),
+    /// so the rotation coordinators' readings can be trusted for portrait.
+    var isConfidentlyUpright: Bool { upright.withLock { $0 } }
+    /// Called (on the motion queue) when the phone becomes confidently upright.
+    var onUpright: (@Sendable () -> Void)?
 
     func start() {
         guard motion.isDeviceMotionAvailable else {
@@ -44,10 +51,17 @@ final class HoldOrientation: @unchecked Sendable {
         guard motion.isDeviceMotionActive else { return }
         motion.stopDeviceMotionUpdates()
         state.withLock { $0 = .unknown }
+        upright.withLock { $0 = false }
         Log.camera.info("hold: stopped")
     }
 
     private func update(x: Double, y: Double, z: Double) {
+        let nowUpright = Self.isUpright(x: x, y: y, z: z)
+        let becameUpright = upright.withLock { value -> Bool in
+            defer { value = nowUpright }
+            return nowUpright && !value
+        }
+        if becameUpright { onUpright?() }
         let next = Self.classify(x: x, y: y, z: z, previous: current)
         let changed = state.withLock { hold -> Bool in
             guard hold != next else { return false }
@@ -57,6 +71,11 @@ final class HoldOrientation: @unchecked Sendable {
         if changed {
             Log.camera.debug("hold: \(next.rawValue, privacy: .public) (g=\(String(format: "%.2f,%.2f,%.2f", x, y, z), privacy: .public))")
         }
+    }
+
+    /// Clearly upright portrait (top of the phone up, not lying flat).
+    static func isUpright(x: Double, y: Double, z: Double) -> Bool {
+        abs(z) < 0.7 && y < -0.6 && abs(x) < 0.45
     }
 
     /// Pure classification (unit tested). Flat (screen up/down) keeps the

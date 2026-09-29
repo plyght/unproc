@@ -140,6 +140,12 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         tracker.setUpdateHandler { [weak self] rect in
             self?.trackerDidUpdate(rect)
         }
+        // Coordinators catch up with a fresh orientation a beat after gravity does.
+        hold.onUpright = { [weak self] in
+            self?.sessionQueue.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                self?.refreshFrontRotation()
+            }
+        }
         observeSession()
     }
 
@@ -464,8 +470,40 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         if angle < 0 { angle += 360 }
         angle = (angle / 90).rounded() * 90
         if angle >= 360 { angle -= 360 }
-        Log.camera.notice("rotation: front portrait angle=\(Double(angle), privacy: .public) (frontCapture=\(Double(frontCapture), privacy: .public) backCapture=\(Double(backCapture), privacy: .public) square=\(CaptureFormatPicker.isSquareFront(device), privacy: .public) type=\(device.deviceType.rawValue, privacy: .public))")
-        return angle
+        // The derivation is only trustworthy while the phone is visibly upright
+        // (a coordinator created while the phone lay flat can report a stale
+        // orientation, which left the front camera sideways until relaunch).
+        // Remember a trusted answer per camera and reuse it otherwise.
+        let key = "frontPortraitAngle.\(DeviceModel.identifier).\(device.deviceType.rawValue)"
+        let confident = hold.isConfidentlyUpright && abs(backCapture - 90) < 1
+        let cached = UserDefaults.standard.object(forKey: key) as? Double
+        let result: CGFloat
+        if confident {
+            UserDefaults.standard.set(Double(angle), forKey: key)
+            result = angle
+        } else if let cached {
+            result = CGFloat(cached)
+        } else {
+            result = angle
+        }
+        Log.camera.notice("rotation: front portrait angle=\(Double(result), privacy: .public) derived=\(Double(angle), privacy: .public) confident=\(confident, privacy: .public) cached=\(cached.map { String($0) } ?? "nil", privacy: .public) (frontCapture=\(Double(frontCapture), privacy: .public) backCapture=\(Double(backCapture), privacy: .public) square=\(CaptureFormatPicker.isSquareFront(device), privacy: .public) type=\(device.deviceType.rawValue, privacy: .public))")
+        return result
+    }
+
+    /// The phone just became clearly upright: if the front camera is active,
+    /// re-derive its rotation now that the coordinators are trustworthy and
+    /// fix the preview if it was set while the phone lay flat.
+    private func refreshFrontRotation() {
+        guard let device, device.position == .front,
+              let connection = videoOutput.connection(with: .video) else { return }
+        let angle = frontPortraitAngle(for: device)
+        guard connection.videoRotationAngle != angle else { return }
+        guard connection.isVideoRotationAngleSupported(angle) else {
+            Log.camera.error("rotation: front refresh angle \(Double(angle), privacy: .public) unsupported")
+            return
+        }
+        Log.camera.notice("rotation: front refresh \(Double(connection.videoRotationAngle), privacy: .public) -> \(Double(angle), privacy: .public)")
+        connection.videoRotationAngle = angle
     }
 
     /// Whether preview frames should be landscape (square front, landscape selfie).

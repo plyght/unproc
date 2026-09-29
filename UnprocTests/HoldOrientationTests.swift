@@ -25,3 +25,12 @@ final class HoldOrientationTests: XCTestCase {
         XCTAssertEqual(HoldOrientation.classify(x: 0.2, y: -0.95, z: 0, previous: .landscape), .portrait)
     }
 }
+
+final class HoldUprightTests: XCTestCase {
+    func testUprightDetection() {
+        XCTAssertTrue(HoldOrientation.isUpright(x: 0.05, y: -0.95, z: -0.2))
+        XCTAssertFalse(HoldOrientation.isUpright(x: 0.05, y: -0.3, z: -0.95), "flat is not upright")
+        XCTAssertFalse(HoldOrientation.isUpright(x: 0.9, y: -0.2, z: 0), "sideways is not upright")
+        XCTAssertFalse(HoldOrientation.isUpright(x: 0, y: 0.95, z: 0), "upside down is not upright")
+    }
+}
