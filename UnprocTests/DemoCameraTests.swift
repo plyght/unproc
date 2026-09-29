@@ -222,4 +222,61 @@ final class DemoCameraTests: XCTestCase {
         XCTAssertNil(camera.exposure.manualAperture)
         XCTAssertEqual(camera.exposure.bias, 0)
     }
+
+    // MARK: Video (demo)
+
+    func testDemoVideoModeRecordsAMovieWithTheLook() async throws {
+        let camera = try await startedCamera()
+        defer { camera.stop() }
+        await waitUntil(timeout: 10, "a preview frame") { camera.frames.latestFrame != nil }
+        XCTAssertFalse(camera.isVideoMode)
+        await camera.setVideoMode(VideoModeRequest(resolution: .hd1080, fps: .fps30, hdr: false, audio: false))
+        XCTAssertTrue(camera.isVideoMode)
+        XCTAssertEqual(camera.videoFormat?.label, "1080·30")
+
+        try await camera.startRecording(look: LookLibrary.look(id: "s1-01"))
+        XCTAssertTrue(camera.isRecording)
+        XCTAssertNotNil(camera.recordingStartedAt)
+        try await Task.sleep(nanoseconds: 1_200_000_000)
+        let video = try await camera.stopRecording()
+        defer { try? FileManager.default.removeItem(at: video.url) }
+        XCTAssertFalse(camera.isRecording)
+        XCTAssertGreaterThan(video.frames, 5, "frames were written")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: video.url.path))
+        // Demo frames are 3:4 (1080x1440); the recording is their 9:16 centre.
+        XCTAssertEqual(video.width, 810)
+        XCTAssertEqual(video.height, 1440)
+        XCTAssertGreaterThan(video.duration, 0.5)
+
+        let asset = AVURLAsset(url: video.url)
+        let duration = try await asset.load(.duration)
+        XCTAssertGreaterThan(duration.seconds, 0.5)
+        let tracks = try await asset.loadTracks(withMediaType: .video)
+        XCTAssertEqual(tracks.count, 1)
+        let audio = try await asset.loadTracks(withMediaType: .audio)
+        XCTAssertTrue(audio.isEmpty, "no audio in demo mode")
+
+        await camera.setVideoMode(nil)
+        XCTAssertFalse(camera.isVideoMode)
+        XCTAssertNil(camera.videoFormat)
+    }
+
+    func testStopWithoutRecordingThrows() async throws {
+        let camera = try await startedCamera()
+        defer { camera.stop() }
+        do {
+            _ = try await camera.stopRecording()
+            XCTFail("stopRecording must throw when not recording")
+        } catch {}
+    }
+
+    func testRecordingRefusedInPhotoMode() async throws {
+        let camera = try await startedCamera()
+        defer { camera.stop() }
+        do {
+            try await camera.startRecording(look: .zero)
+            XCTFail("recording must be refused in photo mode")
+        } catch {}
+        XCTAssertFalse(camera.isRecording)
+    }
 }

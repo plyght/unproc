@@ -52,6 +52,61 @@ enum FlashSetting: String, Codable, CaseIterable, Sendable {
     case off, auto, on
 }
 
+/// Photo or video. The lock-screen extension is always photo.
+enum CaptureMode: String, Codable, CaseIterable, Sendable {
+    case photo, video
+}
+
+/// Recorded video size (the long side; always 16:9, portrait 9:16).
+enum VideoResolution: String, Codable, CaseIterable, Sendable {
+    case uhd4K = "4k"
+    case hd1080 = "1080"
+
+    /// Long side in pixels.
+    var longSide: Int {
+        switch self {
+        case .uhd4K: 3840
+        case .hd1080: 1920
+        }
+    }
+
+    /// Short side in pixels.
+    var shortSide: Int { longSide * 9 / 16 }
+
+    /// "4K" / "1080".
+    var label: String {
+        switch self {
+        case .uhd4K: "4K"
+        case .hd1080: "1080"
+        }
+    }
+}
+
+/// Recording frame rate.
+enum VideoFrameRate: Int, Codable, CaseIterable, Sendable {
+    case fps24 = 24
+    case fps30 = 30
+    case fps60 = 60
+}
+
+/// Self-timer before the shutter fires (or recording starts).
+enum SelfTimer: Int, Codable, CaseIterable, Sendable {
+    case off = 0
+    case three = 3
+    case ten = 10
+
+    var seconds: Int { rawValue }
+
+    /// off → 3 → 10 → off (the timer button cycles through these).
+    var next: SelfTimer {
+        switch self {
+        case .off: .three
+        case .three: .ten
+        case .ten: .off
+        }
+    }
+}
+
 /// Accent ids: "orange" (unproc's signal orange) or a `DeviceModel.Finish.id`.
 enum AccentID {
     static let orange = "orange"
@@ -76,10 +131,19 @@ struct CaptureSettings: Codable, Equatable, Sendable {
     var flash: FlashSetting = .off
     /// Left-handed layout: thumbnail and lens/zoom button swap sides.
     var lefty: Bool = false
+    /// Photo or video (the lock-screen extension ignores this: photos only).
+    var mode: CaptureMode = .photo
+    var videoResolution: VideoResolution = .uhd4K
+    var videoFPS: VideoFrameRate = .fps30
+    /// HLG BT.2020 10-bit instead of SDR BT.709.
+    var videoHDR: Bool = false
+    /// Self-timer for photos and for starting a recording.
+    var timer: SelfTimer = .off
 
     // Spelled out (not synthesized) so helpers can name the type in signatures.
     enum CodingKeys: String, CodingKey {
         case output, rawFlavor, lookID, doubleExposure, proMode, zebras, peaking, lensID, ratio, accent, flash, lefty
+        case mode, videoResolution, videoFPS, videoHDR, timer
     }
 
     init() {}
@@ -107,6 +171,11 @@ struct CaptureSettings: Codable, Equatable, Sendable {
         accent = Self.field(c, .accent, d.accent)
         flash = Self.field(c, .flash, d.flash)
         lefty = Self.field(c, .lefty, d.lefty)
+        mode = Self.field(c, .mode, d.mode)
+        videoResolution = Self.field(c, .videoResolution, d.videoResolution)
+        videoFPS = Self.field(c, .videoFPS, d.videoFPS)
+        videoHDR = Self.field(c, .videoHDR, d.videoHDR)
+        timer = Self.field(c, .timer, d.timer)
     }
 
     /// `decodeIfPresent` with a fallback; failures are logged, never thrown.

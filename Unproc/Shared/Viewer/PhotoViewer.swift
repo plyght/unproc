@@ -223,7 +223,7 @@ struct PhotoViewer: View {
 
     private var dialogTitle: String {
         let n = history.pendingCount
-        return n == 1 ? "DELETE 1 PHOTO?" : "DELETE \(n) PHOTOS?"
+        return n == 1 ? "DELETE 1 ITEM?" : "DELETE \(n) ITEMS?"
     }
 
     // MARK: Dismiss drag
@@ -436,6 +436,11 @@ private struct PhotoPage: View {
                       namespace: namespace,
                       isActive: isCurrent,
                       isZoomed: $isZoomed)
+            .overlay {
+                if item.isVideo {
+                    VideoPageOverlay(store: store, item: item, isCurrent: isCurrent)
+                }
+            }
             .task(id: item.id) { await load() }
     }
 

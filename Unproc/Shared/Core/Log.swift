@@ -25,6 +25,7 @@ enum Log {
     static let viewer = Logger(subsystem: subsystem, category: "viewer")
     static let lockscreen = Logger(subsystem: subsystem, category: "lockscreen")
     static let settings = Logger(subsystem: subsystem, category: "settings")
+    static let video = Logger(subsystem: subsystem, category: "video")
 
     /// Readable description of any error, including NSError domain/code and
     /// the underlying error chain (e.g. "PHPhotosErrorDomain 3300 …").

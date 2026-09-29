@@ -2,9 +2,10 @@ import SwiftUI
 
 /// Liquid Glass panel that drops down over the top of the viewfinder.
 ///
-///     CAPTURE ────────────────────────────
-///     [JPEG|RAW] [BAYER|PRORAW]    [⚡̸|⚡A|⚡]
-///     [▯ 4:3 | ▯ 3:2 | ▯ 16:9 | □ 1:1]
+///     CAPTURE ────────────────────────────   (VIDEO in video mode:
+///     [JPEG|RAW] [BAYER|PRORAW]    [⚡̸|⚡A|⚡]    [4K|1080]   [24|30|60]
+///     [▯ 4:3 | ▯ 3:2 | ▯ 16:9 | □ 1:1]          [SDR|HDR]  TIMER [OFF|3S|10S])
+///                       TIMER [OFF|3S|10S]
 ///     LOOK ──────────────────── NEUTRAL
 ///     [ZERO|S1 01|…] →
 ///     ASSISTS ────────────────────────────
@@ -16,6 +17,12 @@ import SwiftUI
 /// (see `SettingsControls.swift`) so nothing stacks glass on glass.
 struct SettingsMenu: View {
     let settings: SettingsStore
+    /// Video mode: the VIDEO section replaces CAPTURE.
+    var isVideo: Bool = false
+    /// Frame rates the current video format can record.
+    var offeredRates: [VideoFrameRate] = VideoFrameRate.allCases
+    /// What video mode actually records (e.g. "4K30"), shown in the header.
+    var activeVideoLabel: String? = nil
     var onClose: () -> Void = {}
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -33,7 +40,11 @@ struct SettingsMenu: View {
     var body: some View {
         let value = settings.value
         VStack(alignment: .leading, spacing: 14) {
-            captureSection
+            if isVideo {
+                videoSection
+            } else {
+                captureSection
+            }
             lookSection
             assistsSection
             appearanceSection
@@ -79,7 +90,60 @@ struct SettingsMenu: View {
             ) { (id: String) in
                 settings.value.ratio = FrameRatio(rawValue: id) ?? .fourThree
             }
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
+                timerControl
+            }
         }
+    }
+
+    /// Resolution and frame rate, SDR / HDR, and the self-timer.
+    private var videoSection: some View {
+        let value = settings.value
+        let rates = offeredRates.isEmpty ? VideoFrameRate.allCases : offeredRates
+        let shownRate = VideoSpec.resolve(value.videoFPS, offered: rates)
+        return VStack(alignment: .leading, spacing: 8) {
+            MenuSectionHeader(title: "VIDEO", detail: activeVideoLabel)
+            HStack(spacing: 8) {
+                PillSegmented(segments: Self.resolutionSegments,
+                              selectedID: value.videoResolution.rawValue) { (id: String) in
+                    settings.value.videoResolution = VideoResolution(rawValue: id) ?? .uhd4K
+                }
+                Spacer(minLength: 0)
+                PillSegmented(segments: Self.fpsSegments(rates),
+                              selectedID: String(shownRate.rawValue),
+                              horizontalPadding: 9) { (id: String) in
+                    if let fps = Int(id), let rate = VideoFrameRate(rawValue: fps) {
+                        settings.value.videoFPS = rate
+                    }
+                }
+            }
+            HStack(spacing: 8) {
+                PillSegmented(segments: Self.rangeSegments,
+                              selectedID: value.videoHDR ? "hdr" : "sdr",
+                              horizontalPadding: 9) { (id: String) in
+                    settings.value.videoHDR = id == "hdr"
+                }
+                Spacer(minLength: 0)
+                timerControl
+            }
+        }
+    }
+
+    /// OFF | 3S | 10S.
+    private var timerControl: some View {
+        HStack(spacing: 6) {
+            Text("TIMER")
+                .monoLabel(9, weight: .semibold, color: Color.white.opacity(0.42))
+            PillSegmented(
+                segments: Self.timerSegments,
+                selectedID: String(settings.value.timer.rawValue),
+                horizontalPadding: 9
+            ) { (id: String) in
+                settings.value.timer = SelfTimer(rawValue: Int(id) ?? 0) ?? .off
+            }
+        }
+        .fixedSize()
     }
 
     /// JPEG | RAW, the RAW flavour (only while RAW), and flash on the right.
@@ -207,6 +271,40 @@ struct SettingsMenu: View {
         [
             MenuSegment(id: "jpeg", label: "JPEG", accessibilityID: "menu.format.jpeg"),
             MenuSegment(id: "raw", label: "RAW", accessibilityID: "menu.format.raw"),
+        ]
+    }
+
+    private static var resolutionSegments: [MenuSegment] {
+        [
+            MenuSegment(id: VideoResolution.uhd4K.rawValue, label: "4K", accessibilityID: "menu.video.4k"),
+            MenuSegment(id: VideoResolution.hd1080.rawValue, label: "1080", accessibilityID: "menu.video.1080"),
+        ]
+    }
+
+    private static func fpsSegments(_ rates: [VideoFrameRate]) -> [MenuSegment] {
+        rates.map { (rate: VideoFrameRate) -> MenuSegment in
+            MenuSegment(id: String(rate.rawValue), label: "\(rate.rawValue)",
+                        accessibilityID: "menu.video.fps.\(rate.rawValue)",
+                        accessibilityLabel: "\(rate.rawValue) frames per second")
+        }
+    }
+
+    private static var rangeSegments: [MenuSegment] {
+        [
+            MenuSegment(id: "sdr", label: "SDR", accessibilityID: "menu.video.sdr"),
+            MenuSegment(id: "hdr", label: "HDR", accessibilityID: "menu.video.hdr",
+                        accessibilityLabel: "HDR (HLG)"),
+        ]
+    }
+
+    private static var timerSegments: [MenuSegment] {
+        [
+            MenuSegment(id: "0", label: "OFF", accessibilityID: "menu.timer.off",
+                        accessibilityLabel: "Timer off"),
+            MenuSegment(id: "3", label: "3S", accessibilityID: "menu.timer.3",
+                        accessibilityLabel: "Timer 3 seconds"),
+            MenuSegment(id: "10", label: "10S", accessibilityID: "menu.timer.10",
+                        accessibilityLabel: "Timer 10 seconds"),
         ]
     }
 

@@ -1,4 +1,5 @@
 #if UNPROC_APP
+import AVFoundation
 import Foundation
 import Observation
 import Photos
@@ -59,7 +60,9 @@ final class LibraryPhotoStore: PhotoStore {
         let options = PHFetchOptions()
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         options.fetchLimit = Self.fetchLimit
-        let result = PHAsset.fetchAssets(with: .image, options: options)
+        options.predicate = NSPredicate(format: "mediaType == %d OR mediaType == %d",
+                                        PHAssetMediaType.image.rawValue, PHAssetMediaType.video.rawValue)
+        let result = PHAsset.fetchAssets(with: options)
 
         var newItems: [PhotoItem] = []
         var newAssets: [String: PHAsset] = [:]
@@ -68,7 +71,9 @@ final class LibraryPhotoStore: PhotoStore {
             let asset = result.object(at: index)
             let id = asset.localIdentifier
             newAssets[id] = asset
-            newItems.append(PhotoItem(id: id, source: .asset(id), createdAt: asset.creationDate ?? .distantPast))
+            let isVideo = asset.mediaType == .video
+            newItems.append(PhotoItem(id: id, source: .asset(id), createdAt: asset.creationDate ?? .distantPast,
+                                      isVideo: isVideo, duration: isVideo ? asset.duration : 0))
         }
         assets = newAssets
         let changed = newItems != items
@@ -145,6 +150,25 @@ final class LibraryPhotoStore: PhotoStore {
         let removed = Set(ids)
         for id in ids { assets[id] = nil }
         self.items.removeAll { removed.contains($0.id) }
+    }
+
+    func videoAsset(for item: PhotoItem) async -> AVAsset? {
+        guard item.isVideo, let asset = asset(for: item) else { return nil }
+        let options = PHVideoRequestOptions()
+        options.isNetworkAccessAllowed = true
+        options.deliveryMode = .automatic
+        let manager = imageManager
+        let id = item.id
+        let video: AVAsset? = await withCheckedContinuation { (continuation: CheckedContinuation<AVAsset?, Never>) in
+            manager.requestAVAsset(forVideo: asset, options: options) { avAsset, _, info in
+                if avAsset == nil {
+                    let error = info?[PHImageErrorKey] as? Error
+                    Log.viewer.error("library: video request for \(id, privacy: .public) returned nil error=\(error.map(Log.describe) ?? "none", privacy: .public)")
+                }
+                continuation.resume(returning: avAsset)
+            }
+        }
+        return video
     }
 
     // MARK: Private

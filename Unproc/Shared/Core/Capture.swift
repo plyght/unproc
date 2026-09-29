@@ -32,6 +32,15 @@ struct DevelopedPhoto: @unchecked Sendable {
 protocol CaptureSink: Sendable {
     /// Returns an identifier the viewer can use to locate the new item.
     func save(_ photo: DevelopedPhoto) async throws -> PhotoItem.ID
+    /// Stores a finished movie. The file at `url` is consumed (moved or
+    /// deleted) on success.
+    func saveVideo(at url: URL, capturedAt: Date) async throws -> PhotoItem.ID
+}
+
+extension CaptureSink {
+    func saveVideo(at url: URL, capturedAt: Date) async throws -> PhotoItem.ID {
+        throw UnprocError.saveFailed("Video can't be saved here")
+    }
 }
 
 enum UnprocError: LocalizedError {

@@ -213,6 +213,110 @@ enum CaptureFormatPicker {
         return candidates.max { a, b in score(a) < score(b) }
     }
 
+    /// A video-mode format and what it can do.
+    struct VideoChoice {
+        let format: AVCaptureDevice.Format
+        let resolution: VideoResolution
+        let fps: VideoFrameRate
+        /// 10-bit 4:2:0 ('x420' / 'xf20').
+        let tenBit: Bool
+        /// The format records HLG BT.2020 and HDR was asked for.
+        let hdr: Bool
+        /// Frame rates offered for this resolution (and dynamic range) on this device.
+        let offered: [VideoFrameRate]
+    }
+
+    static let tenBitSubtypes: Set<OSType> = [
+        kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+        kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
+    ]
+    static let eightBitSubtypes: Set<OSType> = [
+        kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+        kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+    ]
+
+    /// The 16:9 format for video mode: exactly `resolution` (else 1080p, else
+    /// the largest 16:9 below it), supporting `fps` (else the fastest rate it
+    /// has), 10-bit 4:2:0 when available, unbinned, video range. SDR needs an
+    /// sRGB-capable format; HDR needs HLG BT.2020 (falls back to SDR when no
+    /// format has it). Nothing that only records ProRes / Apple Log.
+    static func bestVideoFormat(for device: AVCaptureDevice, resolution: VideoResolution,
+                                fps: VideoFrameRate, hdr: Bool) -> VideoChoice? {
+        if hdr, let choice = videoChoice(for: device, resolution: resolution, fps: fps, hdr: true) {
+            return choice
+        }
+        return videoChoice(for: device, resolution: resolution, fps: fps, hdr: false)
+    }
+
+    private static func videoChoice(for device: AVCaptureDevice, resolution: VideoResolution,
+                                    fps: VideoFrameRate, hdr: Bool) -> VideoChoice? {
+        let usable = device.formats.filter { format in
+            let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            guard dims.width > 0, dims.height > 0 else { return false }
+            let long = max(dims.width, dims.height), short = min(dims.width, dims.height)
+            guard abs(Double(long) / Double(short) - 16.0 / 9.0) < 0.02 else { return false }
+            let subtype = CMFormatDescriptionGetMediaSubType(format.formatDescription)
+            if hdr {
+                guard tenBitSubtypes.contains(subtype),
+                      format.supportedColorSpaces.contains(.HLG_BT2020) else { return false }
+            } else {
+                guard tenBitSubtypes.contains(subtype) || eightBitSubtypes.contains(subtype),
+                      format.supportedColorSpaces.contains(.sRGB) else { return false }
+            }
+            return format.videoSupportedFrameRateRanges.contains { $0.maxFrameRate >= 23.5 }
+        }
+        guard !usable.isEmpty else { return nil }
+
+        func longSide(_ format: AVCaptureDevice.Format) -> Int {
+            let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            return Int(max(dims.width, dims.height))
+        }
+        // Resolution: exact, else 1080p, else the largest one below the request.
+        let sizes = Set(usable.map(longSide))
+        let chosenLong: Int
+        let chosenResolution: VideoResolution
+        if sizes.contains(resolution.longSide) {
+            chosenLong = resolution.longSide
+            chosenResolution = resolution
+        } else if sizes.contains(VideoResolution.hd1080.longSide) {
+            chosenLong = VideoResolution.hd1080.longSide
+            chosenResolution = .hd1080
+        } else if let below = sizes.filter({ $0 < resolution.longSide }).max() {
+            chosenLong = below
+            chosenResolution = below >= VideoResolution.uhd4K.longSide ? .uhd4K : .hd1080
+        } else {
+            return nil
+        }
+        let sameSize = usable.filter { longSide($0) == chosenLong }
+        let maxRate = sameSize.flatMap { $0.videoSupportedFrameRateRanges.map(\.maxFrameRate) }.max() ?? 30
+        let offered = VideoSpec.offeredRates(maxRate: maxRate)
+        let rate = VideoSpec.resolve(fps, offered: offered)
+
+        func supports(_ format: AVCaptureDevice.Format, _ rate: VideoFrameRate) -> Bool {
+            let r = Double(rate.rawValue)
+            return format.videoSupportedFrameRateRanges.contains { $0.minFrameRate <= r + 0.01 && $0.maxFrameRate >= r - 0.01 }
+        }
+        // (supports the rate, 10-bit, unbinned, video range, zoom headroom)
+        func score(_ format: AVCaptureDevice.Format) -> (Int, Int, Int, Int, Double) {
+            let subtype = CMFormatDescriptionGetMediaSubType(format.formatDescription)
+            let videoRange = subtype == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+                || subtype == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            return (supports(format, rate) ? 1 : 0,
+                    tenBitSubtypes.contains(subtype) ? 1 : 0,
+                    format.isVideoBinned ? 0 : 1,
+                    videoRange ? 1 : 0,
+                    Double(format.videoMaxZoomFactor))
+        }
+        guard let best = sameSize.max(by: { score($0) < score($1) }) else { return nil }
+        let subtype = CMFormatDescriptionGetMediaSubType(best.formatDescription)
+        return VideoChoice(format: best,
+                           resolution: chosenResolution,
+                           fps: supports(best, rate) ? rate : (offered.last(where: { supports(best, $0) }) ?? rate),
+                           tenBit: tenBitSubtypes.contains(subtype),
+                           hdr: hdr,
+                           offered: offered)
+    }
+
     /// Largest supported still size of a format.
     static func largestPhotoDimensions(of format: AVCaptureDevice.Format) -> CMVideoDimensions? {
         format.supportedMaxPhotoDimensions.max { area($0) < area($1) }

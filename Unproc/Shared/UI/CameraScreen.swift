@@ -12,6 +12,12 @@ struct CameraScreen: View {
     let hooks: HostHooks
 
     @State private var shutter: ShutterCoordinator
+    @State private var video: VideoCoordinator
+    /// Self-timer: seconds left while counting down, else nil.
+    @State private var countdown: Int?
+    @State private var countdownTask: Task<Void, Never>?
+    @State private var countdownTick = 0
+    @State private var timerFireTick = 0
     @State private var showViewer = false
     @State private var showSettings = false
     @State private var showLensPicker = false
@@ -40,6 +46,25 @@ struct CameraScreen: View {
         self.sink = sink
         self.hooks = hooks
         _shutter = State(initialValue: ShutterCoordinator(camera: camera, sink: sink, store: store))
+        _video = State(initialValue: VideoCoordinator(camera: camera, sink: sink, store: store))
+    }
+
+    // MARK: - Mode
+
+    /// Video mode (never in the lock-screen extension: photos only there).
+    private var isVideo: Bool { !hooks.isLockedCapture && settings.value.mode == .video }
+
+    /// HLG video: Looks are not applied (their LUTs are built for SDR).
+    private var isHDRVideo: Bool { isVideo && (camera.videoFormat?.hdr ?? false) }
+
+    /// Frame shape on screen: 9:16 in video mode, else the photo ratio.
+    private var effectiveRatio: FrameRatio { isVideo ? .sixteenNine : settings.value.ratio }
+
+    /// What the camera should be configured for, from the settings.
+    static func videoRequest(_ value: CaptureSettings, locked: Bool) -> VideoModeRequest? {
+        guard !locked, value.mode == .video else { return nil }
+        return VideoModeRequest(resolution: value.videoResolution, fps: value.videoFPS,
+                                hdr: value.videoHDR, audio: true)
     }
 
     // MARK: - Layout
@@ -111,7 +136,7 @@ struct CameraScreen: View {
 
     var body: some View {
         GeometryReader { geo in
-            let m = Metrics(size: geo.size, ratio: settings.value.ratio, landscape: camera.isLandscapeSelfie)
+            let m = Metrics(size: geo.size, ratio: effectiveRatio, landscape: camera.isLandscapeSelfie && !isVideo)
             ZStack(alignment: .top) {
                 viewfinder(m)
                     .frame(width: m.vfWidth, height: m.vfHeight)
@@ -136,7 +161,11 @@ struct CameraScreen: View {
                 }
 
                 if showSettings {
-                    SettingsMenu(settings: settings, onClose: { closeFloating() })
+                    SettingsMenu(settings: settings,
+                                 isVideo: isVideo,
+                                 offeredRates: camera.offeredFrameRates,
+                                 activeVideoLabel: camera.videoFormat?.label,
+                                 onClose: { closeFloating() })
                         .frame(width: m.vfWidth)
                         .padding(.top, m.vfTop)
                         .transition(Theme.popover(anchor: .topTrailing, offsetY: -8, reduceMotion: reduceMotion))
@@ -207,6 +236,17 @@ struct CameraScreen: View {
         }
         // Settings → camera.
         .modifier(Observers(camera: camera, settings: settings, shutter: shutter))
+        .modifier(ModeObservers(
+            camera: camera,
+            settings: settings,
+            shutter: shutter,
+            isLocked: hooks.isLockedCapture,
+            recordStart: video.startTick,
+            recordStop: video.stopTick,
+            countdownTick: countdownTick,
+            timerFire: timerFireTick,
+            videoError: video.lastError
+        ))
         .onChange(of: settings.value.proMode) { _, pro in
             Log.ui.info("settings: pro=\(pro, privacy: .public)")
             camera.proEnabled = pro
@@ -266,6 +306,54 @@ struct CameraScreen: View {
         }
     }
 
+    /// Mode / video settings → camera, plus recording and self-timer haptics.
+    private struct ModeObservers: ViewModifier {
+        let camera: CameraController
+        let settings: SettingsStore
+        let shutter: ShutterCoordinator
+        let isLocked: Bool
+        let recordStart: Int
+        let recordStop: Int
+        let countdownTick: Int
+        let timerFire: Int
+        let videoError: String?
+
+        func body(content: Content) -> some View {
+            content
+                .modifier(VideoTimerHaptics(recordStart: recordStart, recordStop: recordStop,
+                                            countdownTick: countdownTick, timerFire: timerFire))
+                .sensoryFeedback(.error, trigger: videoError) { (_: String?, new: String?) -> Bool in new != nil }
+                .animation(Theme.snappy, value: settings.value.mode)
+                .onChange(of: settings.value.mode) { (old: CaptureMode, new: CaptureMode) in
+                    Log.ui.info("settings: mode \(old.rawValue, privacy: .public) -> \(new.rawValue, privacy: .public)")
+                    if new == .video, shutter.awaitingSecondExposure { shutter.cancelDoubleExposure() }
+                    // Video is always 9:16 portrait frames (no landscape selfie crop).
+                    if new == .video, camera.selfieLandscape { camera.selfieLandscape = false }
+                    apply()
+                }
+                .onChange(of: settings.value.videoResolution) { (_: VideoResolution, new: VideoResolution) in
+                    Log.ui.info("settings: video resolution \(new.label, privacy: .public)")
+                    apply()
+                }
+                .onChange(of: settings.value.videoFPS) { (_: VideoFrameRate, new: VideoFrameRate) in
+                    Log.ui.info("settings: video fps \(new.rawValue, privacy: .public)")
+                    apply()
+                }
+                .onChange(of: settings.value.videoHDR) { (_: Bool, new: Bool) in
+                    Log.ui.info("settings: video hdr \(new, privacy: .public)")
+                    apply()
+                }
+                .onChange(of: settings.value.timer) { (old: SelfTimer, new: SelfTimer) in
+                    Log.ui.info("settings: timer \(old.seconds, privacy: .public)s -> \(new.seconds, privacy: .public)s")
+                }
+        }
+
+        private func apply() {
+            let request = CameraScreen.videoRequest(settings.value, locked: isLocked)
+            Task { await camera.setVideoMode(request) }
+        }
+    }
+
     // MARK: - Viewfinder
 
     @ViewBuilder
@@ -275,7 +363,7 @@ struct CameraScreen: View {
         ZStack {
             ViewfinderView(
                 bus: camera.frames,
-                look: LookLibrary.look(id: value.lookID),
+                look: isHDRVideo ? .zero : LookLibrary.look(id: value.lookID),
                 zebras: value.zebras,
                 peaking: value.peaking,
                 onTap: { point in
@@ -291,6 +379,7 @@ struct CameraScreen: View {
                     camera.track(at: point)
                 },
                 onSwipe: { direction in
+                    guard !camera.isRecording else { return }
                     stepLook(direction)
                 },
                 onPinch: { handlePinch($0) }
@@ -317,7 +406,7 @@ struct CameraScreen: View {
                 .allowsHitTesting(false)
             }
 
-            if value.ratio == .sixteenNine {
+            if effectiveRatio == .sixteenNine {
                 // Tall frame: a gentle darkening at the top and bottom edges so the
                 // floating controls stay legible (no blur).
                 LinearGradient(stops: [
@@ -343,6 +432,10 @@ struct CameraScreen: View {
                     Text(look.name)
                         .monoLabel(10, color: Theme.primary.opacity(0.8))
                         .contentTransition(.opacity)
+                    if isHDRVideo {
+                        Text("LOOKS OFF IN HDR")
+                            .monoLabel(8, color: Theme.secondary)
+                    }
                 }
                 .animation(Theme.fade, value: look.id)
                 .padding(.horizontal, 20)
@@ -351,31 +444,19 @@ struct CameraScreen: View {
                 .allowsHitTesting(false)
                 .transition(Theme.blurFade)
             }
+
+            if let countdown {
+                CountdownNumber(value: countdown)
+            }
         }
         .clipShape(RoundedRectangle(cornerRadius: Theme.viewfinderCorner, style: .continuous))
         .background(Color.white.opacity(0.03), in: RoundedRectangle(cornerRadius: Theme.viewfinderCorner, style: .continuous))
-        .overlay(alignment: .topTrailing) {
-            StatusBadge(settings: value) {
-                showLensPicker = false
-                proExpanded = nil
-                showSettings = true
-            }
-            .padding(12)
-        }
-        .overlay(alignment: .topLeading) {
-            VStack(alignment: .leading, spacing: 0) {
-                if camera.hasFlash {
-                    flashButton
-                } else if camera.supportsSelfieOrientation && camera.currentLens?.isFront == true {
-                    selfieOrientationButton
-                }
-            }
-            .padding(8)   // buttons carry 4pt of invisible tap margin: glass stays 12pt from the edge
-            .animation(Theme.snappy, value: camera.currentLens?.id)
+        .overlay(alignment: .top) {
+            topOverlay(value)
         }
         .overlay(alignment: .bottom) {
             VStack(spacing: 8) {
-                if let error = shutter.lastError {
+                if let error = shutter.lastError ?? video.lastError {
                     Text(error)
                         .monoLabel(9, weight: .semibold, color: Theme.accent)
                         .multilineTextAlignment(.center)
@@ -396,6 +477,7 @@ struct CameraScreen: View {
             .padding(.horizontal, 14)
             .padding(.bottom, 14 + m.barOverlap)
             .animation(Theme.snappy, value: shutter.lastError)
+            .animation(Theme.snappy, value: video.lastError)
         }
         .animation(Theme.fade, value: lookToast == nil)
         .task(id: lookToastTick) {
@@ -448,7 +530,85 @@ struct CameraScreen: View {
 
     // MARK: - Bottom bar
 
+    // MARK: - Top overlay
+
+    /// Flash / selfie + timer (top-left), the recording timecode (centre) and
+    /// the status badge (top-right). While recording only the timecode stays.
+    private func topOverlay(_ value: CaptureSettings) -> some View {
+        let recording = camera.isRecording
+        return ZStack(alignment: .top) {
+            HStack(alignment: .top, spacing: 0) {
+                HStack(alignment: .top, spacing: 0) {
+                    if camera.hasFlash && !isVideo {
+                        flashButton
+                    } else if camera.supportsSelfieOrientation && camera.currentLens?.isFront == true && !isVideo {
+                        selfieOrientationButton
+                    }
+                    timerButton
+                }
+                .padding(8)   // buttons carry 4pt of invisible tap margin: glass stays 12pt from the edge
+                .opacity(recording ? 0 : 1)
+                .allowsHitTesting(!recording)
+                .animation(Theme.snappy, value: camera.currentLens?.id)
+
+                Spacer(minLength: 0)
+
+                StatusBadge(settings: value,
+                            videoLabel: isVideo ? (camera.videoFormat?.label ?? VideoSpec.badge(resolution: value.videoResolution, fps: value.videoFPS.rawValue)) : nil,
+                            videoHDR: isHDRVideo) {
+                    showLensPicker = false
+                    proExpanded = nil
+                    showSettings = true
+                }
+                .padding(12)
+                .opacity(recording ? 0 : 1)
+                .allowsHitTesting(!recording)
+            }
+            if let start = camera.recordingStartedAt {
+                RecordingTimecode(start: start)
+                    .padding(.top, 14)
+                    .transition(Theme.blurFade)
+            }
+        }
+        .animation(Theme.snappy, value: recording)
+    }
+
     // MARK: - Top-left buttons
+
+    /// Self-timer: off → 3 s → 10 s.
+    private var timerButton: some View {
+        let timer = settings.value.timer
+        return Button {
+            let next = timer.next
+            Log.ui.info("ui: timer \(timer.seconds, privacy: .public)s -> \(next.seconds, privacy: .public)s")
+            settings.value.timer = next
+        } label: {
+            Group {
+                if timer == .off {
+                    Image(systemName: "timer")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Theme.primary)
+                } else {
+                    VStack(spacing: 0) {
+                        Image(systemName: "timer")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text("\(timer.seconds)S")
+                            .font(Theme.mono(8, weight: .bold))
+                            .monospacedDigit()
+                    }
+                    .foregroundStyle(Theme.accent)
+                }
+            }
+            .frame(width: 38, height: 38)
+            .glassEffect(.regular.interactive(), in: .circle)
+            .padding(4)   // 46pt tap target, like the flash button
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.pressable)
+        .animation(Theme.snappy, value: timer)
+        .accessibilityLabel(timer == .off ? "Timer off" : "Timer \(timer.seconds) seconds")
+        .accessibilityIdentifier("timerButton")
+    }
 
     private var flashButton: some View {
         let flash = settings.value.flash
@@ -530,23 +690,91 @@ struct CameraScreen: View {
     }
 
     private func bottomBar(_ m: Metrics) -> some View {
-        // Lefty: lens/zoom on the left, thumbnail on the right.
+        // Lefty: lens/zoom on the left, thumbnail on the right. The PHOTO /
+        // VIDEO switch always sits between the thumbnail and the shutter.
         let lefty = settings.value.lefty
         return HStack(spacing: 0) {
             Group {
-                if lefty { lensButton(m) } else { thumbnailButton }
+                if lefty {
+                    lensButton(m)
+                        .frame(width: Metrics.sideItem, height: Metrics.sideItem)
+                } else {
+                    HStack(spacing: 0) {
+                        thumbnailSlot
+                        modeSwitchSlot
+                    }
+                }
             }
-            .frame(width: Metrics.sideItem, height: Metrics.sideItem)
             .frame(maxWidth: .infinity, alignment: .leading)
 
+            shutterControl(m)
+
+            Group {
+                if lefty {
+                    HStack(spacing: 0) {
+                        modeSwitchSlot
+                        thumbnailSlot
+                    }
+                } else {
+                    lensButton(m)
+                        .frame(width: Metrics.sideItem, height: Metrics.sideItem)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(.horizontal, m.barInset)
+        .animation(Theme.snappy, value: lefty)
+    }
+
+    private var thumbnailSlot: some View {
+        thumbnailButton
+            .frame(width: Metrics.sideItem, height: Metrics.sideItem)
+            .opacity(camera.isRecording ? 0.35 : 1)
+            .disabled(camera.isRecording)
+    }
+
+    /// The PHOTO / VIDEO switch, centred in the space between thumbnail and
+    /// shutter (nothing in the lock-screen extension: photos only there).
+    @ViewBuilder
+    private var modeSwitchSlot: some View {
+        if hooks.isLockedCapture {
+            Spacer(minLength: 0)
+        } else {
+            let recording = camera.isRecording
+            ModeSwitch(mode: settings.value.mode) { (mode: CaptureMode) in
+                Log.ui.info("ui: mode -> \(mode.rawValue, privacy: .public)")
+                cancelCountdown()
+                closeFloating()
+                settings.value.mode = mode
+            }
+            .opacity(recording ? 0 : 1)
+            .allowsHitTesting(!recording)
+            .animation(Theme.snappy, value: recording)
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    /// Photo shutter, or the record button in video mode.
+    @ViewBuilder
+    private func shutterControl(_ m: Metrics) -> some View {
+        if isVideo {
+            RecordButton(
+                isRecording: camera.isRecording,
+                isEnabled: camera.status == .running && !camera.isSwitchingMode,
+                width: m.shutterWidth,
+                height: m.shutterHeight
+            ) {
+                shutterPressed()
+            }
+            .transition(.opacity)
+        } else {
             ShutterButton(
                 isEnabled: camera.status == .running,
                 isBusy: shutter.isBusy,
                 width: m.shutterWidth,
                 height: m.shutterHeight
             ) {
-                closeFloating()
-                shutter.shoot()
+                shutterPressed()
             }
             .overlay(alignment: .top) {
                 if shutter.awaitingSecondExposure {
@@ -566,15 +794,8 @@ struct CameraScreen: View {
                 }
             }
             .animation(Theme.snappy, value: shutter.awaitingSecondExposure)
-
-            Group {
-                if lefty { thumbnailButton } else { lensButton(m) }
-            }
-            .frame(width: Metrics.sideItem, height: Metrics.sideItem)
-            .frame(maxWidth: .infinity, alignment: .trailing)
+            .transition(.opacity)
         }
-        .padding(.horizontal, m.barInset)
-        .animation(Theme.snappy, value: lefty)
     }
 
     private var thumbnailButton: some View {
@@ -616,12 +837,70 @@ struct CameraScreen: View {
     // MARK: - Actions
 
     private func hardwareShutter() {
-        Log.ui.info("ui: hardware shutter (viewer open=\(showViewer, privacy: .public))")
+        Log.ui.info("ui: hardware shutter (viewer open=\(showViewer, privacy: .public) video=\(isVideo, privacy: .public) recording=\(camera.isRecording, privacy: .public))")
         if showViewer {
             withAnimation(Theme.snappy) { showViewer = false }
         }
+        shutterPressed()
+    }
+
+    /// On-screen shutter / record button and the hardware buttons.
+    /// Recording stops at once; otherwise the self-timer (if set) counts down
+    /// first, and a press during the countdown cancels it.
+    private func shutterPressed() {
         closeFloating()
-        shutter.shoot()
+        if countdownTask != nil {
+            Log.ui.info("ui: self-timer cancelled")
+            cancelCountdown()
+            return
+        }
+        if isVideo, camera.isRecording {
+            video.stop()
+            return
+        }
+        let timer = settings.value.timer
+        if timer != .off {
+            startCountdown(timer.seconds)
+            return
+        }
+        fire()
+    }
+
+    private func fire() {
+        if isVideo {
+            video.start()
+        } else {
+            shutter.shoot()
+        }
+    }
+
+    private func startCountdown(_ seconds: Int) {
+        Log.ui.info("ui: self-timer \(seconds, privacy: .public)s (video=\(isVideo, privacy: .public))")
+        countdownTask = Task { @MainActor in
+            var remaining = seconds
+            while remaining > 0 {
+                withAnimation(reduceMotion ? Theme.fade : .spring(response: 0.3, dampingFraction: 0.8)) {
+                    countdown = remaining
+                }
+                countdownTick += 1
+                try? await Task.sleep(for: .seconds(1))
+                if Task.isCancelled { return }
+                remaining -= 1
+            }
+            withAnimation(Theme.exit) { countdown = nil }
+            countdownTask = nil
+            timerFireTick += 1
+            Log.ui.info("ui: self-timer fired")
+            fire()
+        }
+    }
+
+    private func cancelCountdown() {
+        countdownTask?.cancel()
+        countdownTask = nil
+        if countdown != nil {
+            withAnimation(Theme.exit) { countdown = nil }
+        }
     }
 
     private func closeFloating() {
@@ -676,6 +955,20 @@ struct CameraScreen: View {
         switch action {
         case .zoom(let zoom)?:
             camera.setZoom(zoom)
+        case .flip?:
+            if camera.isRecording {
+                Log.ui.info("ui: zoom flip ignored while recording")
+                foldRulerForFlip()
+                return
+            }
+            performFlip(action)
+        case nil:
+            break
+        }
+    }
+
+    private func performFlip(_ action: ZoomScrubModel.Action?) {
+        switch action {
         case .flip(.front)?:
             Log.ui.info("ui: zoom flip to front")
             foldRulerForFlip()
@@ -685,7 +978,7 @@ struct CameraScreen: View {
             foldRulerForFlip()
             let back = camera.lenses.first { $0.id == "back.wide" } ?? camera.lenses.first { !$0.isFront }
             if let back { select(back) }
-        case nil:
+        default:
             break
         }
     }
@@ -742,6 +1035,7 @@ struct CameraScreen: View {
         if camera.status != .running {
             await camera.start(preferredLensID: settings.value.lensID, rawFlavor: settings.value.rawFlavor)
         }
+        await camera.setVideoMode(Self.videoRequest(settings.value, locked: hooks.isLockedCapture))
         camera.proEnabled = settings.value.proMode
         installCaptureControls()
         await store.reload()
@@ -750,8 +1044,10 @@ struct CameraScreen: View {
     }
 
     private func deactivate() {
-        Log.ui.notice("ui: deactivate")
+        Log.ui.notice("ui: deactivate recording=\(camera.isRecording, privacy: .public)")
         closeFloating()
+        cancelCountdown()
+        if camera.isRecording { video.stop() }
         camera.stop()
         hooks.setIdleTimerDisabled(false)
     }

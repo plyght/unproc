@@ -21,6 +21,70 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(d.accent, AccentID.orange)
         XCTAssertEqual(d.flash, .off)
         XCTAssertFalse(d.lefty)
+        XCTAssertEqual(d.mode, .photo)
+        XCTAssertEqual(d.videoResolution, .uhd4K)
+        XCTAssertEqual(d.videoFPS, .fps30)
+        XCTAssertFalse(d.videoHDR)
+        XCTAssertEqual(d.timer, .off)
+    }
+
+    func testDecodingPayloadWithoutVideoAndTimerKeys() throws {
+        // Settings saved before video mode / the self-timer existed.
+        let json = """
+        {"output":"raw","rawFlavor":"bayer","lookID":"s1-04","doubleExposure":false,"proMode":true,
+         "zebras":true,"peaking":false,"lensID":"back.wide","ratio":"3:2","accent":"orange","flash":"auto","lefty":true}
+        """
+        let s = try decode(json)
+        XCTAssertEqual(s.output, .raw)
+        XCTAssertEqual(s.lookID, "s1-04")
+        XCTAssertEqual(s.ratio, .threeTwo)
+        XCTAssertEqual(s.flash, .auto)
+        XCTAssertTrue(s.lefty)
+        XCTAssertEqual(s.mode, .photo)
+        XCTAssertEqual(s.videoResolution, .uhd4K)
+        XCTAssertEqual(s.videoFPS, .fps30)
+        XCTAssertFalse(s.videoHDR)
+        XCTAssertEqual(s.timer, .off)
+    }
+
+    func testDecodingVideoAndTimerKeys() throws {
+        let json = """
+        {"mode":"video","videoResolution":"1080","videoFPS":60,"videoHDR":true,"timer":10,"lookID":"s1-02"}
+        """
+        let s = try decode(json)
+        XCTAssertEqual(s.mode, .video)
+        XCTAssertEqual(s.videoResolution, .hd1080)
+        XCTAssertEqual(s.videoFPS, .fps60)
+        XCTAssertTrue(s.videoHDR)
+        XCTAssertEqual(s.timer, .ten)
+        XCTAssertEqual(s.lookID, "s1-02")
+    }
+
+    func testDecodingInvalidVideoAndTimerValuesFallsBack() throws {
+        let json = """
+        {"mode":"cinema","videoResolution":"8k","videoFPS":120,"videoHDR":"yes","timer":5,"lefty":true}
+        """
+        let s = try decode(json)
+        XCTAssertEqual(s.mode, .photo)
+        XCTAssertEqual(s.videoResolution, .uhd4K)
+        XCTAssertEqual(s.videoFPS, .fps30)
+        XCTAssertFalse(s.videoHDR)
+        XCTAssertEqual(s.timer, .off)
+        XCTAssertTrue(s.lefty, "valid fields survive invalid neighbours")
+    }
+
+    func testVideoAndTimerRoundTrip() throws {
+        var s = CaptureSettings()
+        s.mode = .video
+        s.videoResolution = .hd1080
+        s.videoFPS = .fps24
+        s.videoHDR = true
+        s.timer = .three
+        let data = try JSONEncoder().encode(s)
+        XCTAssertEqual(try JSONDecoder().decode(CaptureSettings.self, from: data), s)
+        XCTAssertLessThan(data.count, 4096, "must fit the capture intent's app context")
+        let plist = try PropertyListEncoder().encode(s)
+        XCTAssertEqual(try PropertyListDecoder().decode(CaptureSettings.self, from: plist), s)
     }
 
     func testDecodingEmptyObjectGivesDefaults() throws {

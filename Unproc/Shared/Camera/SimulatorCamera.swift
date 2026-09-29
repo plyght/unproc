@@ -67,6 +67,8 @@ final class SimulatorCamera: @unchecked Sendable {
     private var cache: [String: CIImage] = [:]
     private var lens: Lens?
     private var currentFrame: CIImage?
+    /// Recording in progress (demo video mode): every published frame is also written.
+    private var recorder: VideoRecorder?
 
     init(frames: PreviewFrameBus) {
         self.frames = frames
@@ -151,6 +153,40 @@ final class SimulatorCamera: @unchecked Sendable {
     private func tick() {
         guard let currentFrame else { return }
         frames.publish(currentFrame)
+        recorder?.appendVideo(image: currentFrame, time: CMClockGetTime(CMClockGetHostTimeClock()))
+    }
+
+    // MARK: - Video (demo)
+
+    /// Demo frames stay 3:4; the viewfinder and the recorder crop them to 9:16.
+    func setVideoMode(_ on: Bool) {
+        Log.video.info("demo: video mode \(on, privacy: .public)")
+    }
+
+    /// Starts writing the demo frames through the real recorder (Look baked
+    /// in, no audio), so CI exercises the video pipeline without a camera.
+    func startRecording(config: VideoRecorder.Config) {
+        let recorder = VideoRecorder(config: config)
+        Log.video.notice("demo: record start \(config.url.lastPathComponent, privacy: .public)")
+        queue.async { [self] in
+            self.recorder = recorder
+        }
+    }
+
+    func stopRecording() async throws -> RecordedVideo {
+        let recorder: VideoRecorder? = await withCheckedContinuation { (continuation: CheckedContinuation<VideoRecorder?, Never>) in
+            queue.async { [self] in
+                let current = self.recorder
+                self.recorder = nil
+                continuation.resume(returning: current)
+            }
+        }
+        guard let recorder else {
+            Log.video.error("demo: record stop without a recording")
+            throw UnprocError.captureFailed("Not recording")
+        }
+        Log.video.notice("demo: record stop")
+        return try await recorder.finish()
     }
 
     // MARK: - Framing

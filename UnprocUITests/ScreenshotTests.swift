@@ -163,6 +163,70 @@ final class ScreenshotTests: XCTestCase {
         }
     }
 
+    /// Video mode in the demo feed: switch, record ~2 s, stop, open the
+    /// movie in the viewer. Then the self-timer countdown in photo mode.
+    func testVideoAndTimer() {
+        XCTAssertTrue(app.buttons["shutter"].waitForExistence(timeout: 15), "camera screen never appeared")
+        settle()
+        let before = photoCount()
+
+        XCTAssertTrue(tapIfPresent("mode.video"), "no VIDEO mode switch")
+        settle(1.5)
+        snap("20-video-mode")
+
+        // Record ~2 s.
+        XCTAssertTrue(tapIfPresent("shutter"), "no record button")
+        let timecode = app.descendants(matching: .any)["recordingTime"]
+        XCTAssertTrue(timecode.waitForExistence(timeout: 5), "recording timecode never appeared")
+        settle(2)
+        snap("21-recording")
+        XCTAssertTrue(tapIfPresent("shutter"), "couldn't stop recording")
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline, photoCount() <= before { settle(0.5) }
+        XCTAssertGreaterThan(photoCount(), before, "the video never appeared")
+        settle(1)
+
+        if tapIfPresent("thumbnail") {
+            settle(1.5)
+            tapIfPresent("viewer.video")
+            settle(1)
+            snap("22-video-viewer")
+            tapIfPresent("viewer.close")
+            settle()
+        }
+
+        // Back to photos, 3 s self-timer.
+        XCTAssertTrue(tapIfPresent("mode.photo"), "no PHOTO mode switch")
+        settle(1)
+        if tapIfPresent("statusBadge") {
+            settle(0.5)
+            tapIfPresent("menu.timer.3")
+            if !dismissMenu() { tapIfPresent("statusBadge") }
+            settle()
+        }
+        let afterVideo = photoCount()
+        XCTAssertTrue(tapIfPresent("shutter"))
+        settle(1.2)
+        XCTAssertTrue(app.descendants(matching: .any)["countdown"].exists, "no countdown on screen")
+        snap("23-timer")
+        // The shot fires after the countdown.
+        let shotDeadline = Date().addingTimeInterval(20)
+        while Date() < shotDeadline, photoCount() <= afterVideo { settle(0.5) }
+        XCTAssertGreaterThan(photoCount(), afterVideo, "the timed shot never appeared")
+
+        // The timer button cycles 3 → 10 → off.
+        tapIfPresent("timerButton")
+        tapIfPresent("timerButton")
+        settle(0.5)
+        snap("24-timer-off")
+    }
+
+    private func photoCount() -> Int {
+        let thumb = app.descendants(matching: .any)["thumbnail"]
+        guard thumb.waitForExistence(timeout: 3), let value = thumb.value as? String else { return 0 }
+        return Int(value) ?? 0
+    }
+
     private func dragWhileCapturing(from start: XCUICoordinate, dy: CGFloat, name: String, holdFirst: TimeInterval = 0.4) {
         let shots = Screens()
         DispatchQueue.global().asyncAfter(deadline: .now() + 1.6) {

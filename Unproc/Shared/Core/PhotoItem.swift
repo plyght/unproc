@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import UIKit
 
@@ -13,6 +14,10 @@ struct PhotoItem: Identifiable, Hashable, Sendable {
     let id: String
     let source: Source
     let createdAt: Date
+    /// A movie (shown with a duration badge, played in the viewer).
+    var isVideo: Bool = false
+    /// Seconds; 0 when unknown or a photo.
+    var duration: Double = 0
 }
 
 /// Backing store for the viewer. The app uses Photos; the lock-screen extension
@@ -26,4 +31,10 @@ protocol PhotoStore: AnyObject, Observable {
     func fullImage(for item: PhotoItem) async -> UIImage?
     /// Actually removes items (after the user closes the viewer and confirms).
     func delete(_ items: [PhotoItem]) async throws
+    /// The playable movie of a video item (nil for photos / unavailable).
+    func videoAsset(for item: PhotoItem) async -> AVAsset?
+}
+
+extension PhotoStore {
+    func videoAsset(for item: PhotoItem) async -> AVAsset? { nil }
 }

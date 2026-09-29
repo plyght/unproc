@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import ImageIO
 import Observation
@@ -55,7 +56,7 @@ final class SessionPhotoStore: PhotoStore {
     // MARK: PhotoStore
 
     func reload() async {
-        let found = Self.scan(root)
+        let found = await Self.withDurations(Self.scan(root))
         let changed = found != items
         if changed { items = found }
         Log.viewer.info("session store: reload count=\(found.count, privacy: .public) changed=\(changed, privacy: .public)")
@@ -68,6 +69,9 @@ final class SessionPhotoStore: PhotoStore {
             return nil
         }
         let pixels = Int((max(side, 1) * 3).rounded(.up))
+        if item.isVideo {
+            return await Self.poster(url, maxPixel: pixels)
+        }
         let image = await Task.detached(priority: .userInitiated) {
             Self.downsample(url, maxPixel: pixels)
         }.value
@@ -81,6 +85,9 @@ final class SessionPhotoStore: PhotoStore {
         guard case .file(let url) = item.source else {
             Log.viewer.error("session store: full image for non-file item \(item.id, privacy: .public)")
             return nil
+        }
+        if item.isVideo {
+            return await Self.poster(url, maxPixel: 2048)
         }
         // Decoded off the main thread and capped so a 48 MP frame doesn't
         // cost ~200 MB of memory in the extension.
@@ -139,7 +146,38 @@ final class SessionPhotoStore: PhotoStore {
         if let firstError { throw firstError }
     }
 
+    func videoAsset(for item: PhotoItem) async -> AVAsset? {
+        guard item.isVideo, case .file(let url) = item.source else { return nil }
+        return AVURLAsset(url: url)
+    }
+
     // MARK: Private
+
+    /// First frame of a movie, upright.
+    private static func poster(_ url: URL, maxPixel: Int) async -> UIImage? {
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: maxPixel, height: maxPixel)
+        do {
+            let (cgImage, _) = try await generator.image(at: .zero)
+            return UIImage(cgImage: cgImage)
+        } catch {
+            Log.viewer.error("session store: poster failed \(url.lastPathComponent, privacy: .public): \(Log.describe(error), privacy: .public)")
+            return nil
+        }
+    }
+
+    /// Fills in movie durations.
+    private static func withDurations(_ items: [PhotoItem]) async -> [PhotoItem] {
+        var result = items
+        for index in result.indices where result[index].isVideo {
+            guard case .file(let url) = result[index].source else { continue }
+            if let duration = try? await AVURLAsset(url: url).load(.duration), duration.seconds.isFinite {
+                result[index].duration = duration.seconds
+            }
+        }
+        return result
+    }
 
     private func scheduleReload() {
         pendingReload?.cancel()
@@ -162,14 +200,16 @@ final class SessionPhotoStore: PhotoStore {
             urls = []
         }
         let photos: [PhotoItem] = urls.compactMap { url in
-            // Only JPEGs: DNG siblings and `.saved` / `.deleted` markers
+            // JPEGs and movies: DNG siblings and `.saved` / `.deleted` markers
             // (`SessionMarker`) are never listed.
-            guard url.pathExtension.lowercased() == "jpg" || url.pathExtension.lowercased() == "jpeg" else { return nil }
+            let ext = url.pathExtension.lowercased()
+            let isVideo = ext == "mov" || ext == "mp4"
+            guard ext == "jpg" || ext == "jpeg" || isVideo else { return nil }
             let name = url.deletingPathExtension().lastPathComponent
             let created = parseDate(name)
                 ?? (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate)
                 ?? .distantPast
-            return PhotoItem(id: url.path, source: .file(url), createdAt: created)
+            return PhotoItem(id: url.path, source: .file(url), createdAt: created, isVideo: isVideo)
         }
         return photos.sorted {
             if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }

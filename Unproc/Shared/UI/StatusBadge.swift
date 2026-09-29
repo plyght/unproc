@@ -4,6 +4,9 @@ import SwiftUI
 /// Tapping it opens the settings menu.
 struct StatusBadge: View {
     let settings: CaptureSettings
+    /// Video mode: what it records (e.g. "4K30") replaces JPEG / RAW.
+    var videoLabel: String? = nil
+    var videoHDR: Bool = false
     let action: () -> Void
 
     var body: some View {
@@ -12,11 +15,18 @@ struct StatusBadge: View {
                 Text(LookLibrary.look(id: settings.lookID).code)
                     .monoLabel(11, weight: .bold, color: Theme.accent)
                 HStack(spacing: 4) {
-                    if settings.ratio != .fourThree { tag(settings.ratio.rawValue) }
-                    if settings.doubleExposure { tag("2×EXP") }
-                    if settings.proMode { tag("PRO") }
-                    Text(settings.output == .raw ? "RAW" : "JPEG")
-                        .monoLabel(10, weight: .medium, color: Theme.primary)
+                    if let videoLabel {
+                        if videoHDR { tag("HDR") }
+                        if settings.proMode { tag("PRO") }
+                        Text(videoLabel)
+                            .monoLabel(10, weight: .medium, color: Theme.primary)
+                    } else {
+                        if settings.ratio != .fourThree { tag(settings.ratio.rawValue) }
+                        if settings.doubleExposure { tag("2×EXP") }
+                        if settings.proMode { tag("PRO") }
+                        Text(settings.output == .raw ? "RAW" : "JPEG")
+                            .monoLabel(10, weight: .medium, color: Theme.primary)
+                    }
                 }
             }
             .padding(.horizontal, 8)
@@ -27,6 +37,7 @@ struct StatusBadge: View {
         }
         .buttonStyle(.pressable)
         .animation(Theme.snappy, value: settings)
+        .animation(Theme.snappy, value: videoLabel)
         .accessibilityLabel("Settings")
         .accessibilityIdentifier("statusBadge")
     }

@@ -27,7 +27,9 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
-	<string>unproc needs the camera to take photos.</string>
+	<string>unproc needs the camera to take photos and videos.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>unproc records sound with your videos.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>unproc saves your photos (and their RAW files) to your library.</string>
 	<key>NSPhotoLibraryUsageDescription</key>

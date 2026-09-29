@@ -73,6 +73,30 @@ final class CameraController {
         }
     }
 
+    // MARK: Video mode state
+
+    /// True once the camera runs in video mode (16:9 video format).
+    private(set) var isVideoMode = false
+    /// The format video mode actually records (nil in photo mode).
+    private(set) var videoFormat: ActiveVideoFormat?
+    /// A photo ↔ video reconfiguration is in progress.
+    private(set) var isSwitchingMode = false
+    private(set) var isRecording = false
+    private(set) var recordingStartedAt: Date?
+
+    /// Frame rates the menu offers for the current video resolution.
+    var offeredFrameRates: [VideoFrameRate] { videoFormat?.offered ?? VideoFrameRate.allCases }
+
+    private enum ModeTarget: Equatable {
+        case photo
+        case video(VideoModeRequest)
+    }
+
+    @ObservationIgnored private var desiredMode: ModeTarget = .photo
+    /// The engine starts in photo mode.
+    @ObservationIgnored private var appliedMode: ModeTarget = .photo
+    @ObservationIgnored private var modeLoop: Task<Void, Never>?
+
     /// Allowed range for manual white balance.
     static let kelvinRange: ClosedRange<Float> = 1800...12000
 
@@ -219,6 +243,11 @@ final class CameraController {
             return
         }
         let fromID = currentLens?.id ?? "nil"
+        let fromDevice = currentLens?.deviceID
+        if isRecording, target.deviceID != fromDevice || target.isFront != (currentLens?.isFront ?? false) {
+            Log.video.notice("controller: select \(target.id, privacy: .public) ignored while recording (camera change)")
+            return
+        }
         Log.camera.info("controller: select \(fromID, privacy: .public) -> \(target.id, privacy: .public)")
         stopTrackingState()
         focus.point = nil
@@ -234,6 +263,9 @@ final class CameraController {
         case let .switched(active, ranges):
             currentLens = active
             apply(ranges)
+            if isVideoMode, active.deviceID != fromDevice {
+                videoFormat = await engine.currentVideoFormat()
+            }
             if !zoomFromCameraControl { engine.updateControlZoom(Float(active.zoom)) }
         case let .failed(message):
             Log.camera.error("controller: select \(target.id, privacy: .public) failed: \(message, privacy: .public)")
@@ -335,6 +367,113 @@ final class CameraController {
         rawFlavor = flavor
         guard demo == nil else { return }
         await engine.setRawFlavor(flavor)
+    }
+
+    // MARK: - Video mode
+
+    /// Photo mode (`nil`) or video mode with `request`. Calls are coalesced:
+    /// only the latest request is applied once the current one finishes.
+    func setVideoMode(_ request: VideoModeRequest?) async {
+        desiredMode = request.map { ModeTarget.video($0) } ?? .photo
+        if modeLoop == nil {
+            modeLoop = Task { await self.runModeLoop() }
+        }
+        await modeLoop?.value
+    }
+
+    private func runModeLoop() async {
+        isSwitchingMode = true
+        while desiredMode != appliedMode {
+            let target = desiredMode
+            switch target {
+            case .photo: await applyVideoMode(nil)
+            case .video(let request): await applyVideoMode(request)
+            }
+            appliedMode = target
+        }
+        isSwitchingMode = false
+        modeLoop = nil
+    }
+
+    private func applyVideoMode(_ request: VideoModeRequest?) async {
+        let wanted = request.map { "video \($0.resolution.label)@\($0.fps.rawValue) hdr=\($0.hdr)" } ?? "photo"
+        Log.video.notice("controller: mode -> \(wanted, privacy: .public) recording=\(self.isRecording, privacy: .public)")
+        if let demo {
+            demo.setVideoMode(request != nil)
+            isVideoMode = request != nil
+            videoFormat = request.map {
+                ActiveVideoFormat(resolution: $0.resolution, fps: $0.fps, tenBit: false, hdr: false,
+                                  offered: VideoFrameRate.allCases)
+            }
+            return
+        }
+        if let request, request.audio {
+            await Self.requestMicrophoneIfNeeded()
+        }
+        switch await engine.setVideoMode(request, intent: makeIntent()) {
+        case let .configured(lens, ranges, video):
+            currentLens = lens
+            apply(ranges)
+            isVideoMode = request != nil
+            videoFormat = video
+            Log.video.notice("controller: mode now \(request == nil ? "photo" : "video", privacy: .public) format=\(video?.label ?? "-", privacy: .public) tenBit=\(video?.tenBit ?? false, privacy: .public) hdr=\(video?.hdr ?? false, privacy: .public)")
+        case .deferred:
+            isVideoMode = request != nil
+            videoFormat = nil
+        case let .failed(message):
+            Log.video.error("controller: mode change failed: \(message, privacy: .public)")
+        }
+    }
+
+    /// Asks for the microphone the first time video mode is used.
+    private static func requestMicrophoneIfNeeded() async {
+        let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        guard status == .notDetermined else {
+            Log.video.info("controller: microphone authorization=\(status.rawValue, privacy: .public)")
+            return
+        }
+        let granted = await AVCaptureDevice.requestAccess(for: .audio)
+        Log.video.notice("controller: microphone prompt granted=\(granted, privacy: .public)")
+    }
+
+    /// Starts recording with `look` baked into the frames (ignored for HDR).
+    func startRecording(look: Look) async throws {
+        guard isVideoMode, !isRecording, !isSwitchingMode, status == .running else {
+            Log.video.error("controller: record refused videoMode=\(self.isVideoMode, privacy: .public) recording=\(self.isRecording, privacy: .public) switching=\(self.isSwitchingMode, privacy: .public) status=\(String(describing: self.status), privacy: .public)")
+            throw UnprocError.cameraUnavailable
+        }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("unproc-rec-\(UUID().uuidString).mov")
+        if let demo {
+            let format = videoFormat
+            let config = VideoRecorder.Config(
+                url: url,
+                look: look,
+                resolution: format?.resolution ?? .hd1080,
+                fps: format?.fps.rawValue ?? 30,
+                tenBit: false,
+                hdr: false,
+                rotationDegrees: 0,
+                audioSettings: nil
+            )
+            demo.startRecording(config: config)
+        } else {
+            try await engine.startRecording(url: url, look: look)
+        }
+        isRecording = true
+        recordingStartedAt = Date()
+        Log.video.notice("controller: recording \(url.lastPathComponent, privacy: .public)")
+    }
+
+    /// Stops recording and returns the finished movie (in a temporary folder).
+    func stopRecording() async throws -> RecordedVideo {
+        guard isRecording else { throw UnprocError.captureFailed("Not recording") }
+        isRecording = false
+        recordingStartedAt = nil
+        if let demo {
+            return try await demo.stopRecording()
+        }
+        return try await engine.stopRecording()
     }
 
     // MARK: - Focus

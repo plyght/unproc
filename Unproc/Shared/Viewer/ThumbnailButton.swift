@@ -61,6 +61,12 @@ struct ThumbnailButton: View {
                                 .transition(.opacity)
                         }
                         .clipShape(shape)
+                        .overlay(alignment: .bottomTrailing) {
+                            if let latest, latest.isVideo {
+                                VideoDurationBadge(duration: latest.duration, fontSize: 7)
+                                    .padding(2)
+                            }
+                        }
                         // Reduce Motion: no shared id, so the viewer crossfades in instead of growing.
                         .matchedGeometryEffect(id: reduceMotion ? "photo-hero-thumb" : ViewerStyle.heroID, in: namespace)
                         .frame(width: size, height: size)

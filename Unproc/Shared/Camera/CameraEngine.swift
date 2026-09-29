@@ -62,6 +62,35 @@ enum CameraSelectOutcome: Sendable {
     case failed(String)
 }
 
+/// Video mode as asked for by the UI.
+struct VideoModeRequest: Equatable, Sendable {
+    var resolution: VideoResolution
+    var fps: VideoFrameRate
+    var hdr: Bool
+    /// Record the microphone (adds an audio input to the session).
+    var audio: Bool
+}
+
+/// What video mode actually runs at on this device.
+struct ActiveVideoFormat: Equatable, Sendable {
+    var resolution: VideoResolution
+    var fps: VideoFrameRate
+    var tenBit: Bool
+    var hdr: Bool
+    /// Frame rates this resolution can record here.
+    var offered: [VideoFrameRate]
+
+    /// Status badge text, e.g. "4K30".
+    var label: String { VideoSpec.badge(resolution: resolution, fps: fps.rawValue) }
+}
+
+enum VideoModeOutcome: Sendable {
+    case configured(lens: Lens, ranges: CameraDeviceRanges, video: ActiveVideoFormat?)
+    /// Stored; applied when the session is configured.
+    case deferred
+    case failed(String)
+}
+
 // MARK: - Engine
 
 /// Owns the `AVCaptureSession` and the active `AVCaptureDevice`.
@@ -70,7 +99,8 @@ enum CameraSelectOutcome: Sendable {
 /// only touched on `sessionQueue`. Public methods either hop there
 /// asynchronously (fire-and-forget) or bridge to `async` with a continuation.
 /// Results flow back to `CameraController` through the event handler.
-final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
+final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
+                          AVCaptureAudioDataOutputSampleBufferDelegate, @unchecked Sendable {
     let session = AVCaptureSession()
     let sessionQueue = DispatchQueue(label: "lol.peril.unproc.camera.session", qos: .userInitiated)
     let frames: PreviewFrameBus
@@ -80,6 +110,10 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
 
     private let videoQueue = DispatchQueue(label: "lol.peril.unproc.camera.video", qos: .userInteractive)
     private let liveQueue = DispatchQueue(label: "lol.peril.unproc.camera.live", qos: .utility)
+    private let audioQueue = DispatchQueue(label: "lol.peril.unproc.camera.audio", qos: .userInitiated)
+    /// The recording in progress, fed from the video and audio queues.
+    private let recorderLock = NSLock()
+    private var activeRecorder: VideoRecorder?
     private let tracker = SubjectTracker()
 
     // Lock-protected, read from any queue.
@@ -90,6 +124,14 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     // MARK: session-queue state
     private let photoOutput = AVCapturePhotoOutput()
     private let videoOutput = AVCaptureVideoDataOutput()
+    private let audioOutput = AVCaptureAudioDataOutput()
+    private var audioInput: AVCaptureDeviceInput?
+    /// Video mode; nil = photo mode.
+    private var videoRequest: VideoModeRequest?
+    /// The video format in use while in video mode.
+    private var activeVideo: ActiveVideoFormat?
+    /// Pixel format currently asked of the video data output.
+    private var videoOutputPixelFormat: OSType = kCVPixelFormatType_32BGRA
     private var configured = false
     private var wantsRunning = false
     private var device: AVCaptureDevice?
@@ -293,6 +335,166 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         }
     }
 
+    // MARK: - Video mode
+
+    /// Switches between photo mode (`nil`) and video mode: reconfigures the
+    /// active format (16:9 video format at the frame rate, or the 4:3 RAW
+    /// photo format), the video output's pixel format and the microphone.
+    /// The lens (and its zoom) is kept.
+    func setVideoMode(_ request: VideoModeRequest?, intent: CameraIntent) async -> VideoModeOutcome {
+        await onSessionQueue { [self] () -> VideoModeOutcome in
+            let before = videoRequest
+            videoRequest = request
+            guard configured, let device, let lens = self.lens else {
+                Log.video.info("mode: \(request == nil ? "photo" : "video", privacy: .public) stored until the session is configured")
+                return .deferred
+            }
+            if recorderLock.withLock({ activeRecorder }) != nil {
+                Log.video.error("mode: change requested while recording; ignored")
+                videoRequest = before
+                return .failed("Recording")
+            }
+            let clock = ContinuousClock()
+            let began = clock.now
+            let wanted = request.map { "video \($0.resolution.label)@\($0.fps.rawValue) hdr=\($0.hdr) audio=\($0.audio)" } ?? "photo"
+            Log.video.notice("mode: -> \(wanted, privacy: .public) on \(lens.id, privacy: .public)")
+            tracker.stop()
+            session.beginConfiguration()
+            // Video mode has no photo output: nothing constrains the video
+            // format (ProRAW, photo sizes) and stills can't be taken by mistake.
+            let photoAttached = session.outputs.contains(where: { $0 === photoOutput })
+            if request != nil, photoAttached {
+                session.removeOutput(photoOutput)
+                Log.video.info("mode: photo output removed")
+            } else if request == nil, !photoAttached {
+                if session.canAddOutput(photoOutput) {
+                    session.addOutput(photoOutput)
+                    Log.video.info("mode: photo output re-added")
+                } else {
+                    Log.video.error("mode: cannot re-add the photo output")
+                }
+            }
+            let locked = applyFormatLocked(device, lensID: lens.id)
+            configureVideoOutputFormat()
+            configureAudio(enabled: request?.audio ?? false)
+            configureConnections(isFront: device.position == .front)
+            session.commitConfiguration()
+            if locked {
+                device.unlockForConfiguration()
+            }
+            configureConnections(isFront: device.position == .front)
+            applySelfieAspect()
+            frozenISO = nil
+            frozenDuration = nil
+            simulatingLongExposure = false
+            configurePhotoOutput()
+            if request == nil,
+               photoOutput.availableRawPhotoPixelFormatTypes.isEmpty,
+               device.position == .back,
+               session.sessionPreset != .photo,
+               session.canSetSessionPreset(.photo) {
+                Log.camera.error("format: no RAW formats with chosen format on \(lens.id, privacy: .public); falling back to .photo preset")
+                session.beginConfiguration()
+                session.sessionPreset = .photo
+                session.commitConfiguration()
+                configurePhotoOutput()
+            }
+            setZoom(lens.crop, on: device)
+            applyIntent(intent)
+            let ms = CameraLogText.ms(clock.now - began)
+            Log.video.notice("mode: now \(request == nil ? "photo" : "video", privacy: .public) active=\(self.activeVideo?.label ?? "photo", privacy: .public) format=\(CameraLogText.format(device.activeFormat), privacy: .public) running=\(self.session.isRunning, privacy: .public) in \(ms, privacy: .public)ms")
+            return .configured(lens: lens, ranges: ranges(of: device), video: activeVideo)
+        }
+    }
+
+    /// The video format in use (nil in photo mode).
+    func currentVideoFormat() async -> ActiveVideoFormat? {
+        await onSessionQueue { [self] () -> ActiveVideoFormat? in activeVideo }
+    }
+
+    /// Starts writing the video frames (and microphone) to `url`, with `look`
+    /// baked in. Landscape holds get a rotated track so they play landscape.
+    func startRecording(url: URL, look: Look) async throws {
+        let result: Result<Void, Error> = await onSessionQueue { [self] () -> Result<Void, Error> in
+            guard session.isRunning, let device, let video = activeVideo, videoRequest != nil else {
+                Log.video.error("record: cannot start running=\(self.session.isRunning, privacy: .public) device=\(self.device != nil, privacy: .public) videoMode=\(self.videoRequest != nil, privacy: .public)")
+                return .failure(UnprocError.cameraUnavailable)
+            }
+            if recorderLock.withLock({ activeRecorder }) != nil {
+                return .failure(UnprocError.captureFailed("Already recording"))
+            }
+            let isFront = device.position == .front
+            let recordedAngle = Double(videoOutput.connection(with: .video)?.videoRotationAngle ?? previewAngle)
+            let coordinator: AVCaptureDevice.RotationCoordinator
+            if let existing = rotationCoordinators[device.uniqueID] {
+                coordinator = existing
+            } else {
+                coordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
+                rotationCoordinators[device.uniqueID] = coordinator
+            }
+            let captureAngle = Double(coordinator.videoRotationAngleForHorizonLevelCapture)
+            let held = hold.current
+            var rotation = 0
+            if held != .portrait {
+                // Mirrored front frames turn the other way.
+                rotation = isFront
+                    ? VideoSpec.trackRotation(captureAngle: recordedAngle, recordedAngle: captureAngle)
+                    : VideoSpec.trackRotation(captureAngle: captureAngle, recordedAngle: recordedAngle)
+            }
+            var audioSettings: [String: Any]?
+            if audioInput != nil, session.outputs.contains(where: { $0 === audioOutput }) {
+                let recommended = audioOutput.recommendedAudioSettingsForAssetWriter(writingTo: .mov) as? [String: Any]
+                var settings: [String: Any] = recommended
+                    ?? [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 48_000, AVNumberOfChannelsKey: 2]
+                settings[AVFormatIDKey] = kAudioFormatMPEG4AAC
+                audioSettings = settings
+                let channels = (settings[AVNumberOfChannelsKey] as? NSNumber)?.intValue ?? -1
+                let rate = (settings[AVSampleRateKey] as? NSNumber)?.doubleValue ?? -1
+                Log.video.info("record: audio AAC channels=\(channels, privacy: .public) rate=\(rate, privacy: .public)")
+            }
+            let config = VideoRecorder.Config(
+                url: url,
+                look: video.hdr ? .zero : look,
+                resolution: video.resolution,
+                fps: video.fps.rawValue,
+                tenBit: video.tenBit,
+                hdr: video.hdr,
+                rotationDegrees: rotation,
+                audioSettings: audioSettings
+            )
+            let recorder = VideoRecorder(config: config)
+            recorderLock.withLock { activeRecorder = recorder }
+            Log.video.notice("record: started \(url.lastPathComponent, privacy: .public) \(video.label, privacy: .public) hold=\(held.rawValue, privacy: .public) recordedAngle=\(recordedAngle, privacy: .public) captureAngle=\(captureAngle, privacy: .public) rotation=\(rotation, privacy: .public) front=\(isFront, privacy: .public) look=\(config.look.id, privacy: .public)")
+            return .success(())
+        }
+        try result.get()
+    }
+
+    /// Stops the recording and finishes the file.
+    func stopRecording() async throws -> RecordedVideo {
+        let recorder: VideoRecorder? = recorderLock.withLock {
+            let current = activeRecorder
+            activeRecorder = nil
+            return current
+        }
+        guard let recorder else {
+            Log.video.error("record: stop without a recording")
+            throw UnprocError.captureFailed("Not recording")
+        }
+        Log.video.notice("record: stopping")
+        return try await recorder.finish()
+    }
+
+    /// Abandons a recording (the camera is going away), deleting its file.
+    func cancelRecording() {
+        let recorder: VideoRecorder? = recorderLock.withLock {
+            let current = activeRecorder
+            activeRecorder = nil
+            return current
+        }
+        recorder?.cancel()
+    }
+
     private func configureOutputs() {
         Log.camera.info("session: configuring outputs")
         session.beginConfiguration()
@@ -365,22 +567,8 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         self.lens = lens
 
         // Keep the device locked across commit so the session can't override the format.
-        var lockedForFormat = false
-        let bestFormat = CaptureFormatPicker.bestPhotoFormat(for: newDevice)
-        if bestFormat == nil {
-            Log.camera.error("format: no suitable 4:3 high-quality format on \(lens.id, privacy: .public) (\(newDevice.formats.count, privacy: .public) formats); using .photo preset")
-        }
-        if let format = bestFormat,
-           (try? newDevice.lockForConfiguration()) != nil {
-            newDevice.activeFormat = format
-            lockedForFormat = true
-            Log.camera.info("format: chose \(CameraLogText.format(format), privacy: .public)")
-        } else if session.canSetSessionPreset(.photo) {
-            if bestFormat != nil {
-                Log.camera.error("format: lockForConfiguration failed on \(lens.id, privacy: .public); using .photo preset")
-            }
-            session.sessionPreset = .photo
-        }
+        let lockedForFormat = applyFormatLocked(newDevice, lensID: lens.id)
+        configureVideoOutputFormat()
         configureConnections(isFront: newDevice.position == .front)
         session.commitConfiguration()
         if lockedForFormat {
@@ -398,8 +586,10 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         Log.camera.info("format: active \(CameraLogText.format(newDevice.activeFormat), privacy: .public) preset=\(self.session.sessionPreset.rawValue, privacy: .public)")
 
         configurePhotoOutput()
-        // The chosen format didn't give us RAW: fall back to the photo preset.
-        if photoOutput.availableRawPhotoPixelFormatTypes.isEmpty,
+        // The chosen format didn't give us RAW: fall back to the photo preset
+        // (photo mode only: video mode keeps its video format).
+        if videoRequest == nil,
+           photoOutput.availableRawPhotoPixelFormatTypes.isEmpty,
            newDevice.position == .back,
            session.sessionPreset != .photo,
            session.canSetSessionPreset(.photo) {
@@ -422,6 +612,176 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         if controlsConfig != nil, session.controls.isEmpty {
             Log.controls.info("controls: none installed after device switch; installing")
             installControls()
+        }
+    }
+
+    /// Picks and applies the active format for the current mode: the best 4:3
+    /// RAW-capable photo format, or the video-mode format (16:9, frame rate,
+    /// 10-bit, SDR/HLG). Call inside `beginConfiguration`; returns true when
+    /// the device was left locked (unlock after `commitConfiguration`).
+    private func applyFormatLocked(_ device: AVCaptureDevice, lensID: String) -> Bool {
+        if let request = videoRequest {
+            guard let choice = CaptureFormatPicker.bestVideoFormat(for: device, resolution: request.resolution,
+                                                                   fps: request.fps, hdr: request.hdr) else {
+                let preset: AVCaptureSession.Preset = request.resolution == .uhd4K && session.canSetSessionPreset(.hd4K3840x2160)
+                    ? .hd4K3840x2160 : .hd1920x1080
+                Log.video.error("format: no 16:9 video format on \(lensID, privacy: .public) (\(device.formats.count, privacy: .public) formats); using preset \(preset.rawValue, privacy: .public)")
+                if session.canSetSessionPreset(preset) { session.sessionPreset = preset }
+                activeVideo = ActiveVideoFormat(resolution: preset == .hd4K3840x2160 ? .uhd4K : .hd1080,
+                                                fps: .fps30, tenBit: false, hdr: false, offered: [.fps30])
+                return false
+            }
+            do {
+                try device.lockForConfiguration()
+            } catch {
+                Log.video.error("format: lock failed on \(lensID, privacy: .public): \(Log.describe(error), privacy: .public)")
+                return false
+            }
+            device.activeFormat = choice.format
+            let rate = Double(choice.fps.rawValue)
+            let rateSupported = choice.format.videoSupportedFrameRateRanges.contains {
+                $0.minFrameRate <= rate + 0.01 && $0.maxFrameRate >= rate - 0.01
+            }
+            if rateSupported {
+                let duration = CMTime(value: 1, timescale: CMTimeScale(choice.fps.rawValue))
+                device.activeVideoMinFrameDuration = duration
+                device.activeVideoMaxFrameDuration = duration
+            } else {
+                Log.video.error("format: \(choice.fps.rawValue, privacy: .public) fps not in the chosen format's ranges; keeping its default")
+            }
+            applyZeroProcessingLocked(device, video: true, hdr: choice.hdr)
+            activeVideo = ActiveVideoFormat(resolution: choice.resolution, fps: choice.fps, tenBit: choice.tenBit,
+                                            hdr: choice.hdr, offered: choice.offered)
+            let offered = choice.offered.map { String($0.rawValue) }.joined(separator: ",")
+            Log.video.notice("format: video \(CameraLogText.format(choice.format), privacy: .public) res=\(choice.resolution.label, privacy: .public) fps=\(choice.fps.rawValue, privacy: .public) tenBit=\(choice.tenBit, privacy: .public) hdr=\(choice.hdr, privacy: .public) (asked hdr=\(request.hdr, privacy: .public)) offered=[\(offered, privacy: .public)] binned=\(choice.format.isVideoBinned, privacy: .public)")
+            return true
+        }
+
+        activeVideo = nil
+        let bestFormat = CaptureFormatPicker.bestPhotoFormat(for: device)
+        if bestFormat == nil {
+            Log.camera.error("format: no suitable 4:3 high-quality format on \(lensID, privacy: .public) (\(device.formats.count, privacy: .public) formats); using .photo preset")
+        }
+        if let format = bestFormat,
+           (try? device.lockForConfiguration()) != nil {
+            device.activeFormat = format
+            applyZeroProcessingLocked(device, video: false, hdr: false)
+            Log.camera.info("format: chose \(CameraLogText.format(format), privacy: .public)")
+            return true
+        }
+        if session.canSetSessionPreset(.photo) {
+            if bestFormat != nil {
+                Log.camera.error("format: lockForConfiguration failed on \(lensID, privacy: .public); using .photo preset")
+            }
+            session.sessionPreset = .photo
+        }
+        return false
+    }
+
+    /// Video mode is as unprocessed as AVFoundation allows: no video HDR, no
+    /// global tone mapping, no geometric distortion correction, no Center
+    /// Stage, SDR BT.709 (sRGB primaries) or HLG BT.2020. Photo mode restores
+    /// the defaults (wide colour, distortion correction, automatic video HDR).
+    /// `device` must be locked.
+    private func applyZeroProcessingLocked(_ device: AVCaptureDevice, video: Bool, hdr: Bool) {
+        let format = device.activeFormat
+        session.automaticallyConfiguresCaptureDeviceForWideColor = !video
+        if video {
+            let space: AVCaptureColorSpace = hdr ? .HLG_BT2020 : .sRGB
+            if format.supportedColorSpaces.contains(space) {
+                device.activeColorSpace = space
+            } else {
+                Log.video.error("format: colour space \(hdr ? "HLG" : "sRGB", privacy: .public) unsupported by the format")
+            }
+        } else if format.supportedColorSpaces.contains(.P3_D65) {
+            device.activeColorSpace = .P3_D65
+        }
+        if format.isVideoHDRSupported {
+            if video {
+                device.automaticallyAdjustsVideoHDREnabled = false
+                device.isVideoHDREnabled = false
+            } else {
+                device.automaticallyAdjustsVideoHDREnabled = true
+            }
+        }
+        if video, format.isGlobalToneMappingSupported {
+            device.isGlobalToneMappingEnabled = false
+        }
+        if device.isGeometricDistortionCorrectionSupported {
+            device.isGeometricDistortionCorrectionEnabled = !video
+        }
+        if video, device.position == .front, format.isCenterStageSupported {
+            AVCaptureDevice.centerStageControlMode = .app
+            AVCaptureDevice.isCenterStageEnabled = false
+        } else if !video, AVCaptureDevice.centerStageControlMode == .app {
+            AVCaptureDevice.centerStageControlMode = .user
+        }
+        Log.video.info("format: zero processing video=\(video, privacy: .public) hdr=\(hdr, privacy: .public) colorSpace=\(device.activeColorSpace.rawValue, privacy: .public) videoHDR=\(format.isVideoHDRSupported ? String(device.isVideoHDREnabled) : "n/a", privacy: .public) gtm=\(format.isGlobalToneMappingSupported ? String(device.isGlobalToneMappingEnabled) : "n/a", privacy: .public) gdc=\(device.isGeometricDistortionCorrectionSupported ? String(device.isGeometricDistortionCorrectionEnabled) : "n/a", privacy: .public) centerStage=\(AVCaptureDevice.isCenterStageEnabled, privacy: .public)")
+    }
+
+    /// Photo mode: BGRA frames. Video mode: the format's own 4:2:0 buffers
+    /// (8- or 10-bit), so recording can pass them to the encoder untouched.
+    private func configureVideoOutputFormat() {
+        var wanted: OSType = kCVPixelFormatType_32BGRA
+        if videoRequest != nil, let device {
+            let native = CMFormatDescriptionGetMediaSubType(device.activeFormat.formatDescription)
+            let available = videoOutput.availableVideoPixelFormatTypes
+            if available.contains(native) {
+                wanted = native
+            } else {
+                let list = available.map(CameraLogText.fourCC).joined(separator: ",")
+                Log.video.error("video output: native \(CameraLogText.fourCC(native), privacy: .public) not offered (available=[\(list, privacy: .public)]); using BGRA")
+            }
+        }
+        guard wanted != videoOutputPixelFormat else { return }
+        videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: wanted]
+        videoOutputPixelFormat = wanted
+        Log.video.info("video output: pixel format \(CameraLogText.fourCC(wanted), privacy: .public)")
+    }
+
+    /// Microphone input + audio output, only in video mode (so photo mode
+    /// never touches the audio session and never interrupts music).
+    /// Call inside `beginConfiguration`.
+    private func configureAudio(enabled: Bool) {
+        if enabled {
+            if audioInput == nil {
+                let status = AVCaptureDevice.authorizationStatus(for: .audio)
+                if status == .authorized, let mic = AVCaptureDevice.default(for: .audio) {
+                    do {
+                        let input = try AVCaptureDeviceInput(device: mic)
+                        if session.canAddInput(input) {
+                            session.addInput(input)
+                            audioInput = input
+                            Log.video.info("audio: microphone input added (\(mic.localizedName, privacy: .public))")
+                        } else {
+                            Log.video.error("audio: session cannot add the microphone input")
+                        }
+                    } catch {
+                        Log.video.error("audio: microphone input failed: \(Log.describe(error), privacy: .public)")
+                    }
+                } else {
+                    Log.video.notice("audio: no microphone (authorization=\(status.rawValue, privacy: .public)); recording without sound")
+                }
+            }
+            if audioInput != nil, !session.outputs.contains(where: { $0 === audioOutput }) {
+                if session.canAddOutput(audioOutput) {
+                    session.addOutput(audioOutput)
+                    audioOutput.setSampleBufferDelegate(self, queue: audioQueue)
+                    Log.video.info("audio: output added")
+                } else {
+                    Log.video.error("audio: session cannot add the audio output")
+                }
+            }
+        } else {
+            if let audioInput {
+                session.removeInput(audioInput)
+                self.audioInput = nil
+                Log.video.info("audio: microphone input removed")
+            }
+            if session.outputs.contains(where: { $0 === audioOutput }) {
+                session.removeOutput(audioOutput)
+                Log.video.info("audio: output removed")
+            }
         }
     }
 
@@ -496,6 +856,8 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     private func refreshFrontRotation() {
         guard let device, device.position == .front,
               let connection = videoOutput.connection(with: .video) else { return }
+        // Never turn the frames mid-recording.
+        guard recorderLock.withLock({ activeRecorder }) == nil else { return }
         let angle = frontPortraitAngle(for: device)
         guard connection.videoRotationAngle != angle else { return }
         guard connection.isVideoRotationAngleSupported(angle) else {
@@ -559,6 +921,11 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
 
     private func configurePhotoOutput() {
         guard let device else { return }
+        // Video mode runs without the photo output.
+        guard videoRequest == nil, session.outputs.contains(where: { $0 === photoOutput }) else {
+            Log.camera.debug("photo output: not attached (video mode); skipping configuration")
+            return
+        }
         session.beginConfiguration()
         photoOutput.maxPhotoQualityPrioritization = .balanced
         // A virtual camera has no Bayer RAW: ProRAW is its only RAW, so it is
@@ -790,6 +1157,10 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     func captureOutput(_ output: AVCaptureOutput,
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
+        if output === audioOutput {
+            recorderLock.withLock { activeRecorder }?.appendAudio(sampleBuffer)
+            return
+        }
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
@@ -818,6 +1189,9 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
                     video.videoRotationAngle = 90
                 }
             }
+        }
+        if let recorder = recorderLock.withLock({ activeRecorder }) {
+            recorder.appendVideo(pixelBuffer: pixelBuffer, time: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
         }
         frames.publish(CIImage(cvPixelBuffer: pixelBuffer))
         tracker.feed(pixelBuffer)
@@ -1349,6 +1723,11 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     func capturePhoto(fallbackLens: Lens) async throws -> CapturedFrame {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<CapturedFrame, Error>) in
             sessionQueue.async { [self] in
+                guard videoRequest == nil, session.outputs.contains(where: { $0 === photoOutput }) else {
+                    Log.capture.error("capture: photo requested in video mode; refused")
+                    continuation.resume(throwing: UnprocError.captureFailed("Video mode"))
+                    return
+                }
                 guard session.isRunning, let device else {
                     Log.capture.error("capture: camera unavailable running=\(self.session.isRunning, privacy: .public) device=\(self.device != nil, privacy: .public) interrupted=\(self.session.isInterrupted, privacy: .public)")
                     continuation.resume(throwing: UnprocError.cameraUnavailable)

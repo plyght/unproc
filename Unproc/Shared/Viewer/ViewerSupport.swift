@@ -176,6 +176,12 @@ struct StoreThumbnail: View {
                 }
             }
             .clipped()
+            .overlay(alignment: .bottomTrailing) {
+                if item.isVideo {
+                    VideoDurationBadge(duration: item.duration, fontSize: 7)
+                        .padding(2)
+                }
+            }
             .task(id: item.id) {
                 if let cached = ViewerImageCache.thumb(item.id, minSide: side) {
                     image = cached

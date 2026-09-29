@@ -35,6 +35,39 @@ that the extension must not use with `#if UNPROC_APP`.
 6. A `CaptureSink` stores it: `PhotoLibrarySink` (JPEG as photo, DNG as
    alternate resource — one asset) or `SessionContentSink` (lock screen).
 
+## Video mode (app only; the lock-screen extension is photos only)
+- `CaptureSettings.mode` (`.photo`/`.video`), `videoResolution` (4K/1080),
+  `videoFPS` (24/30/60), `videoHDR` (HLG BT.2020 10-bit, off = SDR BT.709) and
+  `timer` (off/3/10 s) — all decoded tolerantly.
+- `CameraController.setVideoMode(_:)` → `CameraEngine.setVideoMode`: removes the
+  photo output, picks a 16:9 format (`CaptureFormatPicker.bestVideoFormat`:
+  exact resolution, frame rate, 10-bit 'x420' preferred, unbinned, sRGB or
+  HLG), fixes the frame duration, and turns off everything that "processes":
+  video HDR, global tone mapping, geometric distortion correction, Center
+  Stage, stabilization. The video data output switches to the format's own
+  4:2:0 buffers. The microphone (input + `AVCaptureAudioDataOutput`) is added
+  only in video mode (permission asked on first entry). Photo mode restores
+  the RAW photo format. The virtual camera and `videoZoomFactor` zoom keep
+  working while recording.
+- `VideoRecorder` (`Unproc/Shared/Camera`): frames from the video queue (and
+  audio) go to a private writer queue (drops, never blocks, max 3 pending);
+  `AVAssetWriter` .mov, HEVC Main10 / Main (H.264 fallback), ~50 Mb/s at 4K30,
+  AAC audio, 709 or HLG colour tags, track transform for landscape holds.
+  Identity Look + output-sized frames = camera buffers passed straight to the
+  encoder; otherwise 9:16 crop → `LookLibrary.apply` → Metal `CIContext`
+  render into the adaptor's pool. HDR skips Looks ("LOOKS OFF IN HDR").
+- `SimulatorCamera` records its demo frames through the same recorder (no
+  audio), so CI exercises the pipeline.
+- `VideoCoordinator` (UI) starts/stops and saves via `CaptureSink.saveVideo`
+  (`PhotoLibrarySink`: `PHAssetCreationRequest` `.video` resource;
+  `SessionContentSink`: moves the `.mov` into the folder).
+- Viewer: `PhotoItem.isVideo/duration`; `PhotoStore.videoAsset(for:)`;
+  `LibraryPhotoStore` fetches images and videos; pages show the poster with
+  an `AVPlayerLayer` overlay (tap to play/pause); thumbnails get a duration badge.
+- UI: `ModeSwitch` (PHOTO/VIDEO, bottom bar between shutter and thumbnail,
+  follows lefty), `RecordButton`, `RecordingTimecode`, `CountdownNumber`
+  (self-timer), timer button next to the flash button.
+
 ## Module contracts (Core types live in `Unproc/Shared/Core`)
 
 ### Camera — `Unproc/Shared/Camera/`
@@ -130,7 +163,9 @@ struct CameraScreen: View {
 struct ViewfinderView: UIViewRepresentable   // MTKView rendering PreviewFrameBus frames through Look/zebras/peaking via Developer.shared.context
 enum Theme   // colours, fonts
 ```
-Shutter responds to on-screen button and hardware (`onCameraCaptureEvent`).
+Shutter responds to on-screen button and hardware (`onCameraCaptureEvent`);
+in video mode both start/stop recording, and the self-timer (if set) counts
+down first (a second press cancels the countdown).
 
 ### Viewer — `Unproc/Shared/Viewer/`
 ```swift
