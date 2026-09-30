@@ -224,6 +224,8 @@ enum CaptureFormatPicker {
         let hdr: Bool
         /// Frame rates offered for this resolution (and dynamic range) on this device.
         let offered: [VideoFrameRate]
+        /// SDR only: the format can record Apple Log (10-bit), which we develop ourselves.
+        var appleLog: Bool = false
     }
 
     static let tenBitSubtypes: Set<OSType> = [
@@ -240,16 +242,31 @@ enum CaptureFormatPicker {
     /// has), 10-bit 4:2:0 when available, unbinned, video range. SDR needs an
     /// sRGB-capable format; HDR needs HLG BT.2020 (falls back to SDR when no
     /// format has it). Nothing that only records ProRes / Apple Log.
+    ///
+    /// SDR prefers a 10-bit format that can also record Apple Log (Pro
+    /// iPhones), as long as that costs neither resolution nor frame rate:
+    /// Log frames are developed by `LogDevelop` instead of Apple's video look.
     static func bestVideoFormat(for device: AVCaptureDevice, resolution: VideoResolution,
                                 fps: VideoFrameRate, hdr: Bool) -> VideoChoice? {
         if hdr, let choice = videoChoice(for: device, resolution: resolution, fps: fps, hdr: true) {
             return choice
         }
-        return videoChoice(for: device, resolution: resolution, fps: fps, hdr: false)
+        let plain = videoChoice(for: device, resolution: resolution, fps: fps, hdr: false)
+        guard LogDevelop.enabled else { return plain }
+        if let log = videoChoice(for: device, resolution: resolution, fps: fps, hdr: false, appleLog: true) {
+            if let plain, log.resolution != plain.resolution || log.fps != plain.fps {
+                Log.video.notice("format: Apple Log available but only at \(log.resolution.label, privacy: .public)@\(log.fps.rawValue, privacy: .public) (plain \(plain.resolution.label, privacy: .public)@\(plain.fps.rawValue, privacy: .public)); not using Log")
+                return plain
+            }
+            Log.video.notice("format: Apple Log format chosen \(log.resolution.label, privacy: .public)@\(log.fps.rawValue, privacy: .public) on \(device.localizedName, privacy: .public)")
+            return log
+        }
+        Log.video.notice("format: no Apple Log format for \(resolution.label, privacy: .public)@\(fps.rawValue, privacy: .public) on \(device.localizedName, privacy: .public); using the ISP's SDR look")
+        return plain
     }
 
     private static func videoChoice(for device: AVCaptureDevice, resolution: VideoResolution,
-                                    fps: VideoFrameRate, hdr: Bool) -> VideoChoice? {
+                                    fps: VideoFrameRate, hdr: Bool, appleLog: Bool = false) -> VideoChoice? {
         let usable = device.formats.filter { format in
             let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
             guard dims.width > 0, dims.height > 0 else { return false }
@@ -259,6 +276,9 @@ enum CaptureFormatPicker {
             if hdr {
                 guard tenBitSubtypes.contains(subtype),
                       format.supportedColorSpaces.contains(.HLG_BT2020) else { return false }
+            } else if appleLog {
+                guard tenBitSubtypes.contains(subtype),
+                      format.supportedColorSpaces.contains(.appleLog) else { return false }
             } else {
                 guard tenBitSubtypes.contains(subtype) || eightBitSubtypes.contains(subtype),
                       format.supportedColorSpaces.contains(.sRGB) else { return false }
@@ -314,7 +334,8 @@ enum CaptureFormatPicker {
                            fps: supports(best, rate) ? rate : (offered.last(where: { supports(best, $0) }) ?? rate),
                            tenBit: tenBitSubtypes.contains(subtype),
                            hdr: hdr,
-                           offered: offered)
+                           offered: offered,
+                           appleLog: appleLog)
     }
 
     /// Largest supported still size of a format.

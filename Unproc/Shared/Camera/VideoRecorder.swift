@@ -25,8 +25,10 @@ struct RecordedVideo: Sendable {
 /// writer queue; the capture queue never waits. While more than
 /// `maxPending` frames are queued, new ones are dropped instead of blocking.
 ///
-/// Zero processing: with the identity Look and frames already the output
-/// size, the camera's own pixel buffers go straight to the encoder. Otherwise
+/// Zero processing: with the identity Look, non-Log frames already the output
+/// size, the camera's own pixel buffers go straight to the encoder. Apple Log
+/// frames are always developed first (`LogDevelopFilter`, the same cube the
+/// viewfinder uses), then get the Look like any other frame. Otherwise
 /// each frame is centre-cropped to 16:9, scaled, run through the same Look
 /// filter as stills (`LookLibrary.apply`) and rendered with the shared Metal
 /// `CIContext` into buffers from the adaptor's pool.
@@ -37,8 +39,11 @@ struct RecordedVideo: Sendable {
 final class VideoRecorder: @unchecked Sendable {
     struct Config: @unchecked Sendable {
         var url: URL
-        /// Baked into every frame. `.zero` = passthrough.
+        /// Baked into every frame. `.zero` = passthrough (unless `appleLog`).
         var look: Look
+        /// Camera frames are Apple Log: every frame is developed
+        /// (`LogDevelopFilter`) before the Look; never passed through.
+        var appleLog: Bool = false
         var resolution: VideoResolution
         var fps: Int
         /// Source frames are 10-bit: encode HEVC Main10 when possible.
@@ -103,14 +108,15 @@ final class VideoRecorder: @unchecked Sendable {
 
     init(config: Config) {
         self.config = config
-        isIdentityLook = config.look.id == Look.zero.id
+        // Log frames always need developing, so they are never passed through.
+        isIdentityLook = config.look.id == Look.zero.id && !config.appleLog
         if config.hdr {
             renderColorSpace = CGColorSpace(name: CGColorSpace.itur_2100_HLG) ?? CGColorSpaceCreateDeviceRGB()
         } else {
             renderColorSpace = CGColorSpace(name: CGColorSpace.itur_709) ?? CGColorSpaceCreateDeviceRGB()
         }
         let audio = config.audioSettings != nil
-        Log.video.notice("recorder: new \(config.url.lastPathComponent, privacy: .public) look=\(config.look.id, privacy: .public) res=\(config.resolution.label, privacy: .public) fps=\(config.fps, privacy: .public) tenBit=\(config.tenBit, privacy: .public) hdr=\(config.hdr, privacy: .public) rotation=\(config.rotationDegrees, privacy: .public) audio=\(audio, privacy: .public) hevc=\(config.allowHEVC && Self.hevcAvailable, privacy: .public)")
+        Log.video.notice("recorder: new \(config.url.lastPathComponent, privacy: .public) look=\(config.look.id, privacy: .public) res=\(config.resolution.label, privacy: .public) fps=\(config.fps, privacy: .public) tenBit=\(config.tenBit, privacy: .public) hdr=\(config.hdr, privacy: .public) rotation=\(config.rotationDegrees, privacy: .public) audio=\(audio, privacy: .public) log=\(config.appleLog, privacy: .public) hevc=\(config.allowHEVC && Self.hevcAvailable, privacy: .public)")
     }
 
     // MARK: - Input (any queue)
@@ -295,7 +301,8 @@ final class VideoRecorder: @unchecked Sendable {
         tagColor(output)
         let image: CIImage
         switch source {
-        case .buffer(let buffer): image = prepared(CIImage(cvPixelBuffer: buffer))
+        case .buffer(let buffer):
+            image = prepared(config.appleLog ? LogDevelopFilter.developed(buffer) : CIImage(cvPixelBuffer: buffer))
         case .image(let frame): image = prepared(frame)
         }
         let destination = CIRenderDestination(pixelBuffer: output)

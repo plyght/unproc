@@ -79,6 +79,8 @@ struct ActiveVideoFormat: Equatable, Sendable {
     var hdr: Bool
     /// Frame rates this resolution can record here.
     var offered: [VideoFrameRate]
+    /// Frames are Apple Log and are developed by `LogDevelop` (SDR only).
+    var appleLog: Bool = false
 
     /// Status badge text, e.g. "4K30".
     var label: String { VideoSpec.badge(resolution: resolution, fps: fps.rawValue) }
@@ -145,6 +147,9 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
 
     /// Guards the frame-orientation fix (video queue → session queue).
     private let rotationFixPending = Mutex(false)
+    /// Video frames are Apple Log and must be developed (session queue writes,
+    /// video queue reads).
+    private let logFrames = Mutex(false)
     /// Square front camera frame-shape check (video queue ↔ session queue).
     private let selfieShape = Mutex(SelfieShapeCheck())
     /// Physical hold (gravity) for photo orientation.
@@ -382,6 +387,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             if locked {
                 device.unlockForConfiguration()
             }
+            confirmLogColorSpace(device)
             configureConnections(isFront: device.position == .front)
             applySelfieAspect()
             frozenISO = nil
@@ -403,7 +409,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             applyIntent(intent)
             applyTorch()
             let ms = CameraLogText.ms(clock.now - began)
-            Log.video.notice("mode: now \(request == nil ? "photo" : "video", privacy: .public) active=\(self.activeVideo?.label ?? "photo", privacy: .public) format=\(CameraLogText.format(device.activeFormat), privacy: .public) running=\(self.session.isRunning, privacy: .public) in \(ms, privacy: .public)ms")
+            Log.video.notice("mode: now \(request == nil ? "photo" : "video", privacy: .public) active=\(self.activeVideo?.label ?? "photo", privacy: .public) log=\(self.activeVideo?.appleLog ?? false, privacy: .public) colorSpace=\(device.activeColorSpace.rawValue, privacy: .public) format=\(CameraLogText.format(device.activeFormat), privacy: .public) running=\(self.session.isRunning, privacy: .public) in \(ms, privacy: .public)ms")
             return .configured(lens: lens, ranges: ranges(of: device), video: activeVideo)
         }
     }
@@ -456,6 +462,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             let config = VideoRecorder.Config(
                 url: url,
                 look: video.hdr ? .zero : look,
+                appleLog: video.appleLog && !video.hdr,
                 resolution: video.resolution,
                 fps: video.fps.rawValue,
                 tenBit: video.tenBit,
@@ -466,7 +473,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             let recorder = VideoRecorder(config: config)
             recorderLock.withLock { activeRecorder = recorder }
             applyTorch()
-            Log.video.notice("record: started \(url.lastPathComponent, privacy: .public) \(video.label, privacy: .public) hold=\(held.rawValue, privacy: .public) recordedAngle=\(recordedAngle, privacy: .public) captureAngle=\(captureAngle, privacy: .public) rotation=\(rotation, privacy: .public) front=\(isFront, privacy: .public) look=\(config.look.id, privacy: .public)")
+            Log.video.notice("record: started \(url.lastPathComponent, privacy: .public) \(video.label, privacy: .public) hold=\(held.rawValue, privacy: .public) recordedAngle=\(recordedAngle, privacy: .public) captureAngle=\(captureAngle, privacy: .public) rotation=\(rotation, privacy: .public) front=\(isFront, privacy: .public) look=\(config.look.id, privacy: .public) log=\(config.appleLog, privacy: .public)")
             return .success(())
         }
         try result.get()
@@ -578,6 +585,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         if lockedForFormat {
             newDevice.unlockForConfiguration()
         }
+        confirmLogColorSpace(newDevice)
         // Connections can be rebuilt on commit (notably for the front camera);
         // re-apply rotation + mirroring to the final ones.
         configureConnections(isFront: newDevice.position == .front)
@@ -634,12 +642,14 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
                 if session.canSetSessionPreset(preset) { session.sessionPreset = preset }
                 activeVideo = ActiveVideoFormat(resolution: preset == .hd4K3840x2160 ? .uhd4K : .hd1080,
                                                 fps: .fps30, tenBit: false, hdr: false, offered: [.fps30])
+                logFrames.withLock { $0 = false }
                 return false
             }
             do {
                 try device.lockForConfiguration()
             } catch {
                 Log.video.error("format: lock failed on \(lensID, privacy: .public): \(Log.describe(error), privacy: .public)")
+                logFrames.withLock { $0 = false }
                 return false
             }
             device.activeFormat = choice.format
@@ -654,15 +664,21 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             } else {
                 Log.video.error("format: \(choice.fps.rawValue, privacy: .public) fps not in the chosen format's ranges; keeping its default")
             }
-            applyZeroProcessingLocked(device, video: true, hdr: choice.hdr)
+            let log = choice.appleLog && !choice.hdr
+            if log { LogDevelopFilter.prewarm() }
+            applyZeroProcessingLocked(device, video: true, hdr: choice.hdr, appleLog: log)
+            let logActive = log && device.activeColorSpace == .appleLog
+            logFrames.withLock { $0 = logActive }
             activeVideo = ActiveVideoFormat(resolution: choice.resolution, fps: choice.fps, tenBit: choice.tenBit,
-                                            hdr: choice.hdr, offered: choice.offered)
+                                            hdr: choice.hdr, offered: choice.offered, appleLog: logActive)
+            Log.video.notice("format: Apple Log \(logActive ? "ACTIVE (developed by LogDevelop)" : "off", privacy: .public) (format supports=\(choice.format.supportedColorSpaces.contains(.appleLog), privacy: .public) chosen=\(choice.appleLog, privacy: .public) hdr=\(choice.hdr, privacy: .public))")
             let offered = choice.offered.map { String($0.rawValue) }.joined(separator: ",")
             Log.video.notice("format: video \(CameraLogText.format(choice.format), privacy: .public) res=\(choice.resolution.label, privacy: .public) fps=\(choice.fps.rawValue, privacy: .public) tenBit=\(choice.tenBit, privacy: .public) hdr=\(choice.hdr, privacy: .public) (asked hdr=\(request.hdr, privacy: .public)) offered=[\(offered, privacy: .public)] binned=\(choice.format.isVideoBinned, privacy: .public)")
             return true
         }
 
         activeVideo = nil
+        logFrames.withLock { $0 = false }
         let bestFormat = CaptureFormatPicker.bestPhotoFormat(for: device)
         if bestFormat == nil {
             Log.camera.error("format: no suitable 4:3 high-quality format on \(lensID, privacy: .public) (\(device.formats.count, privacy: .public) formats); using .photo preset")
@@ -688,15 +704,18 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     /// Stage, SDR BT.709 (sRGB primaries) or HLG BT.2020. Photo mode restores
     /// the defaults (wide colour, distortion correction, automatic video HDR).
     /// `device` must be locked.
-    private func applyZeroProcessingLocked(_ device: AVCaptureDevice, video: Bool, hdr: Bool) {
+    private func applyZeroProcessingLocked(_ device: AVCaptureDevice, video: Bool, hdr: Bool, appleLog: Bool = false) {
         let format = device.activeFormat
         session.automaticallyConfiguresCaptureDeviceForWideColor = !video
         if video {
-            let space: AVCaptureColorSpace = hdr ? .HLG_BT2020 : .sRGB
+            let space: AVCaptureColorSpace = hdr ? .HLG_BT2020 : (appleLog ? .appleLog : .sRGB)
             if format.supportedColorSpaces.contains(space) {
                 device.activeColorSpace = space
             } else {
-                Log.video.error("format: colour space \(hdr ? "HLG" : "sRGB", privacy: .public) unsupported by the format")
+                Log.video.error("format: colour space \(space.rawValue, privacy: .public) unsupported by the format")
+                if appleLog, format.supportedColorSpaces.contains(.sRGB) {
+                    device.activeColorSpace = .sRGB
+                }
             }
         } else if format.supportedColorSpaces.contains(.P3_D65) {
             device.activeColorSpace = .P3_D65
@@ -722,6 +741,21 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             AVCaptureDevice.centerStageControlMode = .user
         }
         Log.video.info("format: zero processing video=\(video, privacy: .public) hdr=\(hdr, privacy: .public) colorSpace=\(device.activeColorSpace.rawValue, privacy: .public) videoHDR=\(format.isVideoHDRSupported ? String(device.isVideoHDREnabled) : "n/a", privacy: .public) gtm=\(format.isGlobalToneMappingSupported ? String(device.isGlobalToneMappingEnabled) : "n/a", privacy: .public) gdc=\(device.isGeometricDistortionCorrectionSupported ? String(device.isGeometricDistortionCorrectionEnabled) : "n/a", privacy: .public) centerStage=\(AVCaptureDevice.isCenterStageEnabled, privacy: .public)")
+    }
+
+    /// After `commitConfiguration`: the session must not have replaced Apple
+    /// Log. If it did, fall back to passthrough frames (never develop non-Log
+    /// frames as Log).
+    private func confirmLogColorSpace(_ device: AVCaptureDevice) {
+        guard var video = activeVideo, video.appleLog else { return }
+        if device.activeColorSpace == .appleLog {
+            Log.video.info("format: Apple Log confirmed after commit")
+            return
+        }
+        Log.video.error("format: Apple Log lost after commit (colorSpace=\(device.activeColorSpace.rawValue, privacy: .public)); frames pass through undeveloped")
+        video.appleLog = false
+        activeVideo = video
+        logFrames.withLock { $0 = false }
     }
 
     /// Photo mode: BGRA frames. Video mode: the format's own 4:2:0 buffers
@@ -1198,7 +1232,12 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         if let recorder = recorderLock.withLock({ activeRecorder }) {
             recorder.appendVideo(pixelBuffer: pixelBuffer, time: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
         }
-        frames.publish(CIImage(cvPixelBuffer: pixelBuffer))
+        if logFrames.withLock({ $0 }) {
+            // Same develop as the recorder, so the viewfinder shows what is recorded.
+            frames.publish(LogDevelopFilter.developed(pixelBuffer))
+        } else {
+            frames.publish(CIImage(cvPixelBuffer: pixelBuffer))
+        }
         tracker.feed(pixelBuffer)
     }
 

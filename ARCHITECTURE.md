@@ -56,6 +56,22 @@ that the extension must not use with `#if UNPROC_APP`.
   Identity Look + output-sized frames = camera buffers passed straight to the
   encoder; otherwise 9:16 crop → `LookLibrary.apply` → Metal `CIContext`
   render into the adaptor's pool. HDR skips Looks ("LOOKS OFF IN HDR").
+- **Apple Log develop (SDR, Pro iPhones)**: `bestVideoFormat` prefers a
+  10-bit format whose `supportedColorSpaces` has `.appleLog` (only if that
+  costs neither resolution nor fps); the engine sets
+  `activeColorSpace = .appleLog` (wide-colour auto-config is already off in
+  video mode; photo mode turns it back on and sets P3, unchanged) and checks it
+  survived the commit. Log frames are "developed" like RAW stills by
+  `LogDevelop` (`Unproc/Shared/Pipeline/LogDevelop.swift`, pure + unit tested):
+  exact Apple Log inverse → scene-linear Rec.2020 → Rec.709 matrix → Hable
+  filmic curve (toe/shoulder, 18 % grey → 0.46 Rec.709 code, white at
+  scene-linear ≈ 8.6, 0 → 0, no lift/saturation/local TM/sharpening) → 709
+  OETF, all folded into one 64³ `CIColorCube` (`LogDevelopFilter`, frames read
+  with `colorSpace: NSNull`, output matched from ITU-R 709). The engine
+  publishes developed frames to the viewfinder and the recorder develops each
+  frame with the same filter, then the Look; Log never passes through.
+  HDR (HLG), the front camera and non-Pro phones keep the ISP SDR path
+  (identity Look = passthrough). Logs: `format: Apple Log ACTIVE/off`.
 - `SimulatorCamera` records its demo frames through the same recorder (no
   audio), so CI exercises the pipeline.
 - `VideoCoordinator` (UI) starts/stops and saves via `CaptureSink.saveVideo`
