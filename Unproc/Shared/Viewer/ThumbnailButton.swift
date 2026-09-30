@@ -9,7 +9,7 @@ struct ThumbnailButton: View {
     let namespace: Namespace.ID
     let action: () -> Void
 
-    private let size: CGFloat = 44
+    private let size: CGFloat = 46   // + 2 × 3 rim = 52, the bottom bar's control height
     private let corner: CGFloat = 10
     /// Loaded a bit larger than displayed so the hero has pixels to grow from.
     private let loadSide: CGFloat = 160

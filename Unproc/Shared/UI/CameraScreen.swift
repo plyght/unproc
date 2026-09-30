@@ -107,8 +107,10 @@ struct CameraScreen: View {
             barHeight = min(max(remaining * 0.6, 84), 120)
             barTop = refTop + refHeight + max((remaining - barHeight) / 2, 0)
             let compact = size.width < 380 || remaining < 150
-            shutterWidth = compact ? 116 : 132
-            shutterHeight = compact ? 56 : 64
+            // Every bottom-bar control shares one 52pt height: thumbnail tile,
+            // mode tile, shutter / record pill and the lens circle.
+            shutterWidth = compact ? 112 : 124
+            shutterHeight = Metrics.sideItem
             barInset = gutter + 16
 
             // The actual viewfinder for this ratio.

@@ -6,7 +6,7 @@ import SwiftUI
 // MARK: - Mode switch
 
 /// PHOTO / VIDEO switch between the shutter and the thumbnail: the
-/// original rounded-rectangle glass tile (50 × 50, 13pt continuous corners,
+/// original rounded-rectangle glass tile (52 × 52, 13pt continuous corners,
 /// the same outer size and radius as the thumbnail) with a camera and a
 /// video glyph stacked inside. The selected glyph is accent-coloured on a
 /// sliding rounded pill (10pt radius, concentric with the tile's 3pt inset).
@@ -18,10 +18,10 @@ struct ModeSwitch: View {
     @Namespace private var selection
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    static let width: CGFloat = 50
+    static let width: CGFloat = 52
     private static let inset: CGFloat = 3
     private static let corner: CGFloat = 13
-    private static let rowHeight: CGFloat = 22   // 2 × 22 + 2 × 3 = 50, the thumbnail's height
+    private static let rowHeight: CGFloat = 23   // 2 × 23 + 2 × 3 = 52, the bar's control height
 
     var body: some View {
         VStack(spacing: 0) {
