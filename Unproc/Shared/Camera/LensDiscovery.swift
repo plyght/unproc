@@ -303,6 +303,12 @@ enum CaptureFormatPicker {
         kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
         kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
     ]
+    /// Apple Log arrives as 10-bit 4:2:2 ('x422'), not 4:2:0: formats that
+    /// can record Log list it here, so the Log search must accept it.
+    static let tenBit422Subtypes: Set<OSType> = [
+        kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange,
+        kCVPixelFormatType_422YpCbCr10BiPlanarFullRange,
+    ]
     static let eightBitSubtypes: Set<OSType> = [
         kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
         kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
@@ -332,7 +338,14 @@ enum CaptureFormatPicker {
             Log.video.notice("format: Apple Log format chosen \(log.resolution.label, privacy: .public)@\(log.fps.rawValue, privacy: .public) on \(device.localizedName, privacy: .public)")
             return log
         }
-        Log.video.notice("format: no Apple Log format for \(resolution.label, privacy: .public)@\(fps.rawValue, privacy: .public) on \(device.localizedName, privacy: .public); using the ISP's SDR look")
+        let logFormats = device.formats.filter { $0.supportedColorSpaces.contains(.appleLog) }
+        let described = logFormats.prefix(12).map { format -> String in
+            let d = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            let fourCC = CameraLogText.fourCC(CMFormatDescriptionGetMediaSubType(format.formatDescription))
+            let rate = format.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0
+            return "\(d.width)x\(d.height) \(fourCC) \(Int(rate))fps"
+        }.joined(separator: "; ")
+        Log.video.notice("format: no Apple Log format for \(resolution.label, privacy: .public)@\(fps.rawValue, privacy: .public) on \(device.localizedName, privacy: .public) (virtual=\(device.isVirtualDevice, privacy: .public), \(logFormats.count, privacy: .public) Log formats: \(described, privacy: .public)); using the ISP's SDR look")
         return plain
     }
 
@@ -348,7 +361,7 @@ enum CaptureFormatPicker {
                 guard tenBitSubtypes.contains(subtype),
                       format.supportedColorSpaces.contains(.HLG_BT2020) else { return false }
             } else if appleLog {
-                guard tenBitSubtypes.contains(subtype),
+                guard tenBitSubtypes.contains(subtype) || tenBit422Subtypes.contains(subtype),
                       format.supportedColorSpaces.contains(.appleLog) else { return false }
             } else {
                 guard tenBitSubtypes.contains(subtype) || eightBitSubtypes.contains(subtype),
@@ -392,8 +405,9 @@ enum CaptureFormatPicker {
             let subtype = CMFormatDescriptionGetMediaSubType(format.formatDescription)
             let videoRange = subtype == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
                 || subtype == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+                || subtype == kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
             return (supports(format, rate) ? 1 : 0,
-                    tenBitSubtypes.contains(subtype) ? 1 : 0,
+                    (tenBitSubtypes.contains(subtype) || tenBit422Subtypes.contains(subtype)) ? 1 : 0,
                     format.isVideoBinned ? 0 : 1,
                     videoRange ? 1 : 0,
                     Double(format.videoMaxZoomFactor))
@@ -403,7 +417,7 @@ enum CaptureFormatPicker {
         return VideoChoice(format: best,
                            resolution: chosenResolution,
                            fps: supports(best, rate) ? rate : (offered.last(where: { supports(best, $0) }) ?? rate),
-                           tenBit: tenBitSubtypes.contains(subtype),
+                           tenBit: tenBitSubtypes.contains(subtype) || tenBit422Subtypes.contains(subtype),
                            hdr: hdr,
                            offered: offered,
                            appleLog: appleLog)

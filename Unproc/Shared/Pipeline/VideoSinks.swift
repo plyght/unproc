@@ -43,10 +43,12 @@ extension PhotoLibrarySink {
         let name = Self.baseName(for: capturedAt) + ".MOV"
         Log.save.info("save: video begin \(name, privacy: .public) \(bytes, privacy: .public)B from \(url.lastPathComponent, privacy: .public)")
         let result = VideoIdentifierBox()
+        let location = LocationProvider.shared.recentLocation
         do {
             try await PHPhotoLibrary.shared().performChanges {
                 let request = PHAssetCreationRequest.forAsset()
                 request.creationDate = capturedAt
+                request.location = location
                 let options = PHAssetResourceCreationOptions()
                 options.originalFilename = name
                 options.uniformTypeIdentifier = UTType.quickTimeMovie.identifier

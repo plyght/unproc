@@ -30,6 +30,8 @@
 	<string>unproc needs the camera to take photos and videos.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>unproc records sound with your videos.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>unproc tags your photos and videos with where they were taken.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>unproc saves your photos (and their RAW files) to your library.</string>
 	<key>NSPhotoLibraryUsageDescription</key>

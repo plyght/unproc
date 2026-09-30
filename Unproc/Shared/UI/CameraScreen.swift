@@ -1057,6 +1057,8 @@ struct CameraScreen: View {
         Log.ui.notice("ui: activate status=\(String(describing: camera.status), privacy: .public) locked=\(hooks.isLockedCapture, privacy: .public) settings=\(snapshot, privacy: .public)")
 
         hooks.setIdleTimerDisabled(true)
+        // Location for Photos metadata: the app asks once; the lock screen never prompts.
+        LocationProvider.shared.start(prompt: !hooks.isLockedCapture && !Theme.isDemo)
         camera.proEnabled = settings.value.proMode
         camera.flash = settings.value.flash
         if camera.status != .running {
@@ -1071,6 +1073,7 @@ struct CameraScreen: View {
     }
 
     private func deactivate() {
+        LocationProvider.shared.stop()
         Log.ui.notice("ui: deactivate recording=\(camera.isRecording, privacy: .public)")
         closeFloating()
         cancelCountdown()

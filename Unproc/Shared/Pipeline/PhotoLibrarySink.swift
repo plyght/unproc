@@ -125,9 +125,11 @@ final class PhotoLibrarySink: CaptureSink {
     private static func create(photo: URL, raw: URL?, date: Date, photoType: String = UTType.jpeg.identifier) async throws -> String {
         let result = IdentifierBox()
         let rawType = Self.rawType
+        let location = LocationProvider.shared.recentLocation
         try await PHPhotoLibrary.shared().performChanges {
             let request = PHAssetCreationRequest.forAsset()
             request.creationDate = date
+            request.location = location
 
             let photoOptions = PHAssetResourceCreationOptions()
             photoOptions.originalFilename = photo.lastPathComponent.replacingOccurrences(of: "_clean", with: "")

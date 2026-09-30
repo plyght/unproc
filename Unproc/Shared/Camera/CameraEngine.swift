@@ -83,7 +83,7 @@ struct ActiveVideoFormat: Equatable, Sendable {
     var appleLog: Bool = false
 
     /// Status badge text, e.g. "4K30".
-    var label: String { VideoSpec.badge(resolution: resolution, fps: fps.rawValue) }
+    var label: String { VideoSpec.badge(resolution: resolution, fps: fps.rawValue) + (appleLog ? " LOG" : "") }
 }
 
 enum VideoModeOutcome: Sendable {
