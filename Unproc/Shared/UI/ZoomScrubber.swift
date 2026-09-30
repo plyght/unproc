@@ -41,7 +41,7 @@ final class ZoomScrubModel {
     /// Track points per unit of ln(zoom).
     static let pointsPerLog: CGFloat = 72
     /// Raw overshoot needed to flip cameras.
-    static let flipDistance: CGFloat = 80
+    static let flipDistance: CGFloat = 56
     /// Rubber-band limit: visual overshoot approaches this but never reaches it.
     static let stretchLimit: CGFloat = 54
 
