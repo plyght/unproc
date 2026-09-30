@@ -5,23 +5,23 @@ import SwiftUI
 
 // MARK: - Mode switch
 
-/// PHOTO / VIDEO switch between the shutter and the thumbnail: a slim
-/// vertical glass capsule (the shutter's height) holding a camera and a
-/// video glyph. The selected glyph sits on a solid accent knob that springs
-/// between the two. Tap a glyph, or swipe (left / down = VIDEO,
-/// right / up = PHOTO).
+/// PHOTO / VIDEO switch between the shutter and the thumbnail: the
+/// original rounded-rectangle glass tile (50 × 50, 13pt continuous corners,
+/// the same outer size and radius as the thumbnail) with a camera and a
+/// video glyph stacked inside. The selected glyph is accent-coloured on a
+/// sliding rounded pill (10pt radius, concentric with the tile's 3pt inset).
+/// Tap a glyph, or swipe (left / down = VIDEO, right / up = PHOTO).
 struct ModeSwitch: View {
     let mode: CaptureMode
-    var height: CGFloat = 64
     let onSelect: (CaptureMode) -> Void
 
     @Namespace private var selection
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    static let width: CGFloat = 48
+    static let width: CGFloat = 50
     private static let inset: CGFloat = 3
-
-    private var knob: CGFloat { (height - Self.inset * 2) / 2 }
+    private static let corner: CGFloat = 13
+    private static let rowHeight: CGFloat = 22   // 2 × 22 + 2 × 3 = 50, the thumbnail's height
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,9 +29,8 @@ struct ModeSwitch: View {
             option(.video, symbol: "video.fill")
         }
         .padding(Self.inset)
-        .frame(width: knob + Self.inset * 2, height: height)
-        .glassEffect(.regular.tint(Color.black.opacity(0.25)).interactive(), in: .capsule)
         .frame(width: Self.width)
+        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: Self.corner, style: .continuous))
         .contentShape(Rectangle())
         .simultaneousGesture(
             DragGesture(minimumDistance: 10).onEnded { (drag: DragGesture.Value) in
@@ -53,33 +52,33 @@ struct ModeSwitch: View {
 
     private func option(_ option: CaptureMode, symbol: String) -> some View {
         let selected = option == mode
+        let pill = RoundedRectangle(cornerRadius: Self.corner - Self.inset, style: .continuous)
         return Button {
             guard !selected else { return }
             select(option)
         } label: {
-            ZStack {
-                if selected {
-                    Circle()
-                        .fill(Theme.accent)
-                        .shadow(color: Theme.accent.opacity(0.35), radius: 6)
-                        .matchedGeometryEffect(id: "knob", in: selection)
+            Image(systemName: symbol)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(selected ? Theme.accent : Color.white.opacity(0.55))
+                .frame(maxWidth: .infinity, minHeight: Self.rowHeight, maxHeight: Self.rowHeight)
+                .background {
+                    if selected {
+                        pill
+                            .fill(Theme.accent.opacity(0.2))
+                            .overlay { pill.strokeBorder(Theme.accent.opacity(0.45), lineWidth: 1) }
+                            .matchedGeometryEffect(id: "mode", in: selection)
+                    }
                 }
-                Image(systemName: symbol)
-                    .font(.system(size: knob * 0.4, weight: .semibold))
-                    .foregroundStyle(selected ? Color.black : Color.white.opacity(0.55))
-                    .contentTransition(.symbolEffect(.replace))
-            }
-            .frame(width: knob, height: knob)
-            .contentShape(Rectangle())
+                .contentShape(Rectangle())
         }
-        .buttonStyle(PressableStyle(scale: 0.9))
+        .buttonStyle(.pressable)
         .accessibilityLabel(Text(option == .photo ? "Photo" : "Video"))
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityIdentifier(option == .photo ? "mode.photo" : "mode.video")
     }
 
     private func select(_ target: CaptureMode) {
-        withAnimation(reduceMotion ? Theme.fade : .spring(response: 0.3, dampingFraction: 0.74)) {
+        withAnimation(reduceMotion ? Theme.fade : Theme.glassSlide) {
             onSelect(target)
         }
     }
