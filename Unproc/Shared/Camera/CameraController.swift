@@ -16,6 +16,13 @@ final class CameraController {
     /// Ordered by zoom, front last.
     private(set) var lenses: [Lens] = []
     private(set) var currentLens: Lens?
+    /// The lens a camera change (back ↔ front) is on its way to, while the
+    /// session reconfigures; nil otherwise.
+    private(set) var switchTarget: Lens?
+    /// The camera the UI should treat as current: where a flip in flight is
+    /// going, else the current lens. The zoom ruler, pinch and flip read this
+    /// so they never act on the camera that is being left.
+    var activeLens: Lens? { switchTarget ?? currentLens }
     private(set) var exposure: ExposureState = .initial
     private(set) var focus: FocusState = .initial
     /// Seconds the shutter is open right now (drives the screen dim), else nil.
@@ -177,6 +184,7 @@ final class CameraController {
         case let .started(active, ranges, isRunning):
             Log.camera.notice("controller: started lens=\(active.id, privacy: .public) running=\(isRunning, privacy: .public)")
             currentLens = active
+            rememberFront(active)
             apply(ranges)
             hasStarted = true
             status = isRunning ? .running : .idle
@@ -199,6 +207,7 @@ final class CameraController {
             return
         }
         currentLens = lens
+        rememberFront(lens)
         Log.camera.info("controller: demo start lens=\(lens.id, privacy: .public)")
         demo.start(lens: lens)
         hasStarted = true
@@ -253,11 +262,26 @@ final class CameraController {
             Log.video.notice("controller: select \(target.id, privacy: .public) ignored while recording (camera change)")
             return
         }
-        Log.camera.info("controller: select \(fromID, privacy: .public) -> \(target.id, privacy: .public)")
+        // Back ↔ front: a zoom still queued from the scrub that led here
+        // belongs to the camera being left. Applying it after the switch
+        // selected a back lens again and silently undid the flip.
+        let crossing = activeLens.map { $0.isFront != target.isFront } ?? false
+        if crossing {
+            if let stale = pendingZoom {
+                Log.camera.info("controller: dropping queued zoom \(Double(stale.zoom), privacy: .public) (camera change to \(target.id, privacy: .public))")
+            }
+            pendingZoom = nil
+            switchTarget = target
+        }
+        defer {
+            if crossing, switchTarget?.id == target.id { switchTarget = nil }
+        }
+        Log.camera.info("controller: select \(fromID, privacy: .public) -> \(target.id, privacy: .public) crossing=\(crossing, privacy: .public)")
         stopTrackingState()
         focus.point = nil
         if let demo {
             currentLens = target
+            rememberFront(target)
             demo.setLens(target)
             return
         }
@@ -265,30 +289,105 @@ final class CameraController {
         case .notConfigured:
             Log.camera.info("controller: select \(target.id, privacy: .public) stored (not configured)")
             currentLens = target
+            rememberFront(target)
         case let .switched(active, ranges):
             currentLens = active
+            rememberFront(active)
             apply(ranges)
             if isVideoMode, active.deviceID != fromDevice {
                 videoFormat = await engine.currentVideoFormat()
             }
-            if !zoomFromCameraControl { engine.updateControlZoom(Float(active.zoom)) }
+            // The Camera Control zoom slider carries the back stops only.
+            if !zoomFromCameraControl, !active.isFront { engine.updateControlZoom(Float(active.zoom)) }
         case let .failed(message):
             Log.camera.error("controller: select \(target.id, privacy: .public) failed: \(message, privacy: .public)")
         }
     }
 
+    // MARK: - Flip (back ↔ selfie)
+
+    /// Last selfie framing used this session (wide or standard, or a zoom in
+    /// between); a flip to the front comes back to it.
+    @ObservationIgnored private var lastFrontLens: Lens?
+
+    private func rememberFront(_ lens: Lens) {
+        guard lens.isFront, lastFrontLens?.id != lens.id else { return }
+        lastFrontLens = lens
+        Log.camera.debug("controller: remember front framing \(lens.id, privacy: .public) zoom=\(Double(lens.zoom), privacy: .public)")
+    }
+
+    /// Selfie lenses, widest first (two on the square Center Stage sensor).
+    var frontLenses: [Lens] { lenses.filter(\.isFront).sorted { $0.zoom < $1.zoom } }
+
+    /// The selfie camera offers more than one framing.
+    var frontHasStops: Bool { frontLenses.count > 1 }
+
+    /// Where a flip lands: on the front, the last framing used this session
+    /// (else the standard one, "front.tight"); on the back, the main camera.
+    func flipTarget(toFront: Bool) -> Lens? {
+        if toFront {
+            if let last = lastFrontLens { return last }
+            return lenses.first { $0.id == "front.tight" } ?? frontLenses.first
+        }
+        return lenses.first { $0.id == "back.wide" } ?? lenses.first { !$0.isFront }
+    }
+
+    /// Flips between the back and selfie cameras (no-op if already there or
+    /// while recording, which can't change cameras).
+    func flip(toFront: Bool) async {
+        guard let target = flipTarget(toFront: toFront) else {
+            Log.camera.error("controller: flip toFront=\(toFront, privacy: .public): no such camera")
+            return
+        }
+        guard activeLens?.isFront != toFront else {
+            Log.camera.info("controller: flip toFront=\(toFront, privacy: .public) ignored: already there (active=\(self.activeLens?.id ?? "nil", privacy: .public))")
+            return
+        }
+        guard !isRecording else {
+            Log.camera.notice("controller: flip toFront=\(toFront, privacy: .public) ignored while recording")
+            return
+        }
+        Log.camera.info("controller: flip toFront=\(toFront, privacy: .public) -> \(target.id, privacy: .public) (remembered front=\(self.lastFrontLens?.id ?? "nil", privacy: .public))")
+        await select(target)
+    }
+
+    /// Selfie camera with two framings: a tap swaps them (to the standard one
+    /// from anywhere else, to the wide one from the standard one).
+    func toggleFrontFraming() async {
+        let front = frontLenses
+        guard let current = activeLens, current.isFront, front.count > 1,
+              let wide = front.first, let tight = front.last else { return }
+        let onTight = abs(current.zoom - tight.zoom) / tight.zoom < 0.01
+        let target = onTight ? wide : tight
+        Log.camera.info("controller: front framing \(current.id, privacy: .public) -> \(target.id, privacy: .public)")
+        await select(target)
+    }
+
     // MARK: - Continuous zoom
 
-    @ObservationIgnored private var pendingZoom: CGFloat?
+    /// The latest zoom asked for and which camera it is for.
+    @ObservationIgnored private var pendingZoom: (zoom: CGFloat, front: Bool)?
     @ObservationIgnored private var isApplyingZoom = false
 
     /// Zoom factors (relative to the main wide) of the back lenses, ascending,
-    /// crops included — the detents of the zoom scrubber.
-    var zoomStops: [CGFloat] {
+    /// crops included — the detents of the zoom scrubber on the back camera.
+    var backZoomStops: [CGFloat] {
         Array(Set(lenses.filter { !$0.isFront }.map(\.zoom))).sorted()
     }
 
-    /// Continuous zoom across the back cameras. On a virtual camera this is
+    /// The selfie camera's framings as display zoom (standard = 1), ascending.
+    var frontZoomStops: [CGFloat] {
+        Array(Set(lenses.filter(\.isFront).map(\.zoom))).sorted()
+    }
+
+    /// Stops of the camera in use (or being switched to).
+    var zoomStops: [CGFloat] {
+        activeLens?.isFront == true ? frontZoomStops : backZoomStops
+    }
+
+    /// Continuous zoom on the camera in use: across the back cameras, or
+    /// between the selfie framings (one device, `videoZoomFactor` only). On a
+    /// back virtual camera this is
     /// just its `videoZoomFactor`; otherwise it picks the longest physical lens
     /// at or below `zoom` and crops it digitally (the preview via
     /// `videoZoomFactor`, the photo via `Lens.crop` in development). Exact stops
@@ -301,29 +400,38 @@ final class CameraController {
     @ObservationIgnored private var zoomFromCameraControl = false
 
     private func setZoom(_ zoom: CGFloat, fromCameraControl: Bool) {
-        Log.camera.debug("zoom: request \(Double(zoom), privacy: .public) cameraControl=\(fromCameraControl, privacy: .public) busy=\(self.isApplyingZoom, privacy: .public)")
+        // The Camera Control slider carries the back stops (it isn't rebuilt
+        // per camera); everything else zooms the camera in use.
+        let front = fromCameraControl ? false : (activeLens?.isFront ?? false)
+        Log.camera.debug("zoom: request \(Double(zoom), privacy: .public) front=\(front, privacy: .public) cameraControl=\(fromCameraControl, privacy: .public) busy=\(self.isApplyingZoom, privacy: .public)")
         zoomFromCameraControl = fromCameraControl
-        pendingZoom = zoom
+        pendingZoom = (zoom, front)
         guard !isApplyingZoom else { return }
         isApplyingZoom = true
         Task {
             while let next = pendingZoom {
                 pendingZoom = nil
-                if let lens = lensForZoom(next), lens.id != currentLens?.id {
-                    Log.camera.debug("zoom: \(Double(next), privacy: .public) -> lens \(lens.id, privacy: .public) crop=\(Double(lens.crop), privacy: .public)")
-                    // Scrubbing tracks the finger: no zoom ramp.
-                    await select(lens, animated: false)
+                guard let lens = lensForZoom(next.zoom, front: next.front), lens.id != currentLens?.id else { continue }
+                // An on-screen zoom never changes cameras: if a flip happened
+                // since it was asked for, it's stale.
+                if !zoomFromCameraControl, lens.isFront != (activeLens?.isFront ?? lens.isFront) {
+                    Log.camera.info("zoom: dropping \(Double(next.zoom), privacy: .public) for the \(next.front ? "front" : "back", privacy: .public) camera (active=\(self.activeLens?.id ?? "nil", privacy: .public))")
+                    continue
                 }
+                Log.camera.debug("zoom: \(Double(next.zoom), privacy: .public) -> lens \(lens.id, privacy: .public) crop=\(Double(lens.crop), privacy: .public)")
+                // Scrubbing tracks the finger: no zoom ramp.
+                await select(lens, animated: false)
             }
             isApplyingZoom = false
             zoomFromCameraControl = false
         }
     }
 
-    private func lensForZoom(_ zoom: CGFloat) -> Lens? {
+    private func lensForZoom(_ zoom: CGFloat, front: Bool) -> Lens? {
+        if front { return frontLensForZoom(zoom) }
         let back = lenses.filter { !$0.isFront }
         guard !back.isEmpty else { return nil }
-        let stops = zoomStops
+        let stops = backZoomStops
         let clamped = min(max(zoom, stops.first ?? zoom), stops.last ?? zoom)
         // An exact (±1 %) stop is the real lens, crop lenses included.
         if let exact = back.first(where: { abs($0.zoom - clamped) / $0.zoom < 0.01 }) {
@@ -352,6 +460,27 @@ final class CameraController {
             position: base.position,
             kind: base.kind,
             crop: crop,
+            zoom: clamped
+        )
+    }
+
+    /// Selfie camera: the exact framing at a stop, otherwise the same device
+    /// at the proportional `videoZoomFactor` (all front lenses share one
+    /// `factor / displayZoom` ratio).
+    private func frontLensForZoom(_ zoom: CGFloat) -> Lens? {
+        let front = frontLenses
+        guard let first = front.first, let last = front.last, first.zoom > 0 else { return nil }
+        let clamped = min(max(zoom, first.zoom), last.zoom)
+        if let exact = front.first(where: { abs($0.zoom - clamped) / $0.zoom < 0.01 }) {
+            return exact
+        }
+        let scale = first.crop / first.zoom
+        return Lens(
+            id: String(format: "front.zoom@%.2f", clamped),
+            deviceID: first.deviceID,
+            position: first.position,
+            kind: first.kind,
+            crop: max(clamped * scale, 1),
             zoom: clamped
         )
     }
@@ -658,8 +787,9 @@ final class CameraController {
         guard demo == nil else { return }
         Log.controls.info("controller: install capture controls looks=\(lookCodes.count, privacy: .public) sel=\(selectedIndex, privacy: .public) ratios=\(ratioTitles.count, privacy: .public) ratioSel=\(ratioIndex, privacy: .public)")
         let config = CaptureControlsConfig(
-            zoomStops: zoomStops.map { Float($0) },
-            zoom: Float(currentLens?.zoom ?? 1),
+            // Back stops only: the controls are installed once, not per camera.
+            zoomStops: backZoomStops.map { Float($0) },
+            zoom: Float(currentLens.map { $0.isFront ? 1 : $0.zoom } ?? 1),
             onZoom: { [weak self] value in
                 Log.controls.debug("controls: zoom action \(value, privacy: .public)")
                 Task { @MainActor in self?.setZoom(CGFloat(value), fromCameraControl: true) }

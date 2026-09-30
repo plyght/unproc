@@ -138,6 +138,75 @@ final class DemoCameraTests: XCTestCase {
         XCTAssertEqual(camera.currentLens?.id, "back.wide")
     }
 
+    // MARK: Selfie framings
+
+    func testFrontHasTwoFramingsOnOneDevice() async throws {
+        let camera = try await startedCamera()
+        defer { camera.stop() }
+        XCTAssertTrue(camera.frontHasStops)
+        XCTAssertEqual(camera.frontLenses.map(\.id), ["front.wide", "front.tight"])
+        XCTAssertEqual(Set(camera.frontLenses.map(\.deviceID)).count, 1, "both framings are one device")
+        let stops = camera.frontZoomStops
+        XCTAssertEqual(stops.count, 2)
+        XCTAssertEqual(stops[0], 1 / LensDiscovery.squareFrontFallbackFactor, accuracy: 1e-9)
+        XCTAssertEqual(stops[1], 1)
+        XCTAssertEqual(camera.backZoomStops, [0.5, 1, 2, 4, 8])
+        XCTAssertEqual(camera.zoomStops, camera.backZoomStops, "on the back camera the ruler shows back stops")
+    }
+
+    func testFlipLandsOnTheStandardFramingAndRemembersTheLastOne() async throws {
+        let camera = try await startedCamera()
+        defer { camera.stop() }
+        await camera.flip(toFront: true)
+        XCTAssertEqual(camera.currentLens?.id, "front.tight", "first flip: the standard selfie framing")
+        XCTAssertEqual(camera.zoomStops, camera.frontZoomStops, "on the front the ruler shows the selfie stops")
+
+        await camera.toggleFrontFraming()
+        XCTAssertEqual(camera.currentLens?.id, "front.wide")
+        await camera.toggleFrontFraming()
+        XCTAssertEqual(camera.currentLens?.id, "front.tight")
+        await camera.toggleFrontFraming()
+        XCTAssertEqual(camera.currentLens?.id, "front.wide")
+
+        await camera.flip(toFront: false)
+        XCTAssertEqual(camera.currentLens?.id, "back.wide")
+        XCTAssertNil(camera.switchTarget)
+        await camera.flip(toFront: true)
+        XCTAssertEqual(camera.currentLens?.id, "front.wide", "comes back to the last selfie framing")
+        // Flipping to where it already is does nothing.
+        await camera.flip(toFront: true)
+        XCTAssertEqual(camera.currentLens?.id, "front.wide")
+    }
+
+    func testFrontZoomStaysOnTheFrontCamera() async throws {
+        let camera = try await startedCamera()
+        defer { camera.stop() }
+        await camera.flip(toFront: true)
+        camera.setZoom(0.9)
+        await waitUntil("front zoom 0.9") { abs((camera.currentLens?.zoom ?? 0) - 0.9) < 0.001 }
+        var lens = try XCTUnwrap(camera.currentLens)
+        XCTAssertTrue(lens.isFront)
+        XCTAssertEqual(lens.crop, 0.9 * LensDiscovery.squareFrontFallbackFactor, accuracy: 0.001)
+        camera.setZoom(5)
+        await waitUntil("front max") { camera.currentLens?.id == "front.tight" }
+        camera.setZoom(0.1)
+        await waitUntil("front min") { camera.currentLens?.id == "front.wide" }
+        lens = try XCTUnwrap(camera.currentLens)
+        XCTAssertTrue(lens.isFront, "zooming out on the selfie camera never lands on a back lens")
+    }
+
+    func testQueuedBackZoomDoesNotUndoAFlip() async throws {
+        // The scrub that pulls past .5× sends zooms right up to the flip; one
+        // still queued must not switch back to a back lens afterwards.
+        let camera = try await startedCamera()
+        defer { camera.stop() }
+        camera.setZoom(0.7)
+        await camera.flip(toFront: true)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(camera.currentLens?.isFront, true, "flip undone by a stale zoom (now \(camera.currentLens?.id ?? "nil"))")
+        XCTAssertEqual(camera.currentLens?.id, "front.tight")
+    }
+
     func testSelectUnknownDeviceIsIgnored() async throws {
         let camera = try await startedCamera()
         defer { camera.stop() }

@@ -124,9 +124,16 @@ struct FocusState: Equatable, Sendable {
     private(set) var openShutterDuration: Double?
     var proEnabled: Bool                      // false => full auto, continuous AF fixed at centre
 
+    /// A back ↔ front change in flight; the UI acts on `activeLens` (= switchTarget ?? currentLens).
+    private(set) var switchTarget: Lens?
+    var activeLens: Lens? { get }
+    var zoomStops: [CGFloat] { get }         // the active camera's stops: back lenses, or the selfie framings
     func start(preferredLensID: String?, rawFlavor: RawFlavor) async  // asks permission
     func stop()
-    func select(_ lens: Lens) async
+    func select(_ lens: Lens) async          // back ↔ front drops any queued zoom (it belonged to the old camera)
+    func setZoom(_ zoom: CGFloat)            // coalesced; never changes cameras
+    func flip(toFront: Bool) async           // → last selfie framing this session (default "front.tight"), or "back.wide"
+    func toggleFrontFraming() async          // lens-button tap on a two-framing selfie camera
     func setRawFlavor(_ flavor: RawFlavor) async
     // Normalized viewfinder coordinates: (0,0) top-left, (1,1) bottom-right of the 3:4 portrait frame.
     func focus(at point: CGPoint)     // tap: one-shot AF+AE at point
@@ -179,6 +186,18 @@ struct CameraScreen: View {
 struct ViewfinderView: UIViewRepresentable   // MTKView rendering PreviewFrameBus frames through Look/zebras/peaking via Developer.shared.context
 enum Theme   // colours, fonts
 ```
+Zoom ruler (`ZoomScrubModel`, `LensButton`): the thumb stops on the end
+stops' centres; past them is rubber band. Pulling `flipThreshold` (56 pt,
+shortened to fit the room left below the finger, min 34) past the widest back
+stop flips to the selfie camera; from the selfie camera the same pull past its
+longest stop flips back. One flip per gesture; the rest of that drag is
+ignored. Selfie framings: on the square Center Stage front sensor
+`LensDiscovery.frontLenses` makes "front.wide" (min `videoZoomFactor`) and
+"front.tight" (display zoom 1 = 1 / `displayVideoZoomFactorMultiplier`, else
+1.3 on the square sensor); `Lens.zoom` is display zoom with the standard framing
+at 1. They're same-device zoom stops: ruler, pinch and a lens-button tap
+(toggles) move between them. The Camera Control zoom slider keeps the back stops.
+
 Shutter responds to on-screen button and hardware (`onCameraCaptureEvent`);
 in video mode both start/stop recording, and the self-timer (if set) counts
 down first (a second press cancels the countdown).

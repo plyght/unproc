@@ -29,7 +29,12 @@ final class SimulatorCamera: @unchecked Sendable {
         Lens(id: "back.wide.crop2", deviceID: "sim", position: .back, kind: .wide, crop: 2, zoom: 2),
         Lens(id: "back.tele", deviceID: "sim", position: .back, kind: .tele, crop: 1, zoom: 4),
         Lens(id: "back.tele.crop2", deviceID: "sim", position: .back, kind: .tele, crop: 2, zoom: 8),
-        Lens(id: "front.wide", deviceID: "sim", position: .front, kind: .front, crop: 1, zoom: 1),
+        // Two selfie framings like the square Center Stage sensor (wide = the
+        // minimum factor, standard = the fallback factor, displayed as 1×).
+        Lens(id: "front.wide", deviceID: "sim-front", position: .front, kind: .front,
+             crop: 1, zoom: 1 / LensDiscovery.squareFrontFallbackFactor),
+        Lens(id: "front.tight", deviceID: "sim-front", position: .front, kind: .front,
+             crop: LensDiscovery.squareFrontFallbackFactor, zoom: 1),
     ]
 
     static let exposure = ExposureState(

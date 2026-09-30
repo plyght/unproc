@@ -6,7 +6,7 @@ import CoreGraphics
 /// different `videoZoomFactor`; otherwise a physical camera, optionally with a
 /// centre crop ("2×" on the wide, "2× tele" on the telephoto).
 struct Lens: Identifiable, Hashable, Sendable {
-    /// Stable id, e.g. "back.wide", "back.wide.crop2", "back.tele", "back.tele.crop2", "front.wide".
+    /// Stable id, e.g. "back.wide", "back.wide.crop2", "back.tele", "back.tele.crop2", "front.wide", "front.tight".
     let id: String
     /// `AVCaptureDevice.uniqueID` of the camera (the back virtual camera, or a physical one).
     let deviceID: String

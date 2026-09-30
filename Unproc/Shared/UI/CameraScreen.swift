@@ -87,13 +87,16 @@ struct CameraScreen: View {
         let barInset: CGFloat
         /// How far the bottom bar reaches into the viewfinder (0 when it doesn't).
         let barOverlap: CGFloat
+        /// Global y of the screen's bottom edge (how far a drag can go down).
+        var screenBottom: CGFloat = .infinity
         /// Top of the shutter pill, for placing popovers above it.
         var shutterTop: CGFloat { barTop + (barHeight - shutterHeight) / 2 }
 
         static let gutter: CGFloat = 10
         static let sideItem: CGFloat = 52
 
-        init(size: CGSize, ratio: FrameRatio, landscape: Bool = false) {
+        init(size: CGSize, ratio: FrameRatio, landscape: Bool = false, screenBottom: CGFloat = .infinity) {
+            self.screenBottom = screenBottom
             let gutter = Self.gutter
             let minBar: CGFloat = 104
             let refTop: CGFloat = 4
@@ -138,7 +141,8 @@ struct CameraScreen: View {
 
     var body: some View {
         GeometryReader { geo in
-            let m = Metrics(size: geo.size, ratio: effectiveRatio, landscape: camera.isLandscapeSelfie && !isVideo)
+            let m = Metrics(size: geo.size, ratio: effectiveRatio, landscape: camera.isLandscapeSelfie && !isVideo,
+                            screenBottom: geo.frame(in: .global).maxY + geo.safeAreaInsets.bottom)
             ZStack(alignment: .top) {
                 viewfinder(m)
                     .frame(width: m.vfWidth, height: m.vfHeight)
@@ -667,13 +671,15 @@ struct CameraScreen: View {
     // MARK: - Pinch to zoom
 
     private func handlePinch(_ pinch: ViewfinderView.Pinch) {
-        guard let lens = camera.currentLens, !lens.isFront else { return }
+        // Every camera with more than one stop pinches: the back lenses, and
+        // the selfie camera's two framings on the square Center Stage sensor.
+        guard let lens = camera.activeLens, camera.zoomStops.count > 1 else { return }
         switch pinch {
         case .began:
             closeFloating()
             zoomHideTask?.cancel()
             pinchBase = lens.zoom
-            zoomScrub.present(stops: camera.zoomStops, zoom: lens.zoom, isFront: false)
+            zoomScrub.present(stops: camera.zoomStops, zoom: lens.zoom, isFront: lens.isFront)
             if !zoomDialVisible {
                 withAnimation(Theme.snappy) { zoomDialVisible = true }
             }
@@ -687,7 +693,7 @@ struct CameraScreen: View {
             // Same resting rule as the ruler: near a stop lands exactly on it.
             let settled = ZoomScrubModel.settle(zoomScrub.zoom, stops: camera.zoomStops)
             if abs(settled - zoomScrub.zoom) > 0.0001 {
-                zoomScrub.present(stops: camera.zoomStops, zoom: settled, isFront: false)
+                zoomScrub.present(stops: camera.zoomStops, zoom: settled, isFront: lens.isFront)
                 camera.setZoom(settled)
             }
             Log.ui.info("ui: pinch end at \(Double(zoomScrub.zoom), privacy: .public)x (settled \(Double(settled), privacy: .public)x)")
@@ -814,26 +820,34 @@ struct CameraScreen: View {
 
     private func lensButton(_ m: Metrics) -> some View {
             LensButton(
-                current: camera.currentLens,
+                // Where a flip is headed, so the button never shows the old camera.
+                current: camera.activeLens,
                 model: zoomScrub,
                 isExpanded: zoomDialVisible,
+                frontHasStops: camera.frontHasStops,
                 // 16:9: the button floats over the image; keep the ruler above the
                 // line where the image meets the black.
                 rulerMaxBelow: m.barOverlap > 0
                     ? max(m.vfTop + m.vfHeight - (m.barTop + m.barHeight / 2), 0)
                     : .infinity,
+                screenBottom: m.screenBottom,
                 onTap: { whileExpanded in
                     if whileExpanded {
                         zoomHideTask?.cancel()
                         withAnimation(Theme.exit) { zoomDialVisible = false }
+                    } else if camera.activeLens?.isFront == true, camera.frontHasStops {
+                        // Selfie camera with two framings: a tap swaps them.
+                        closeFloating()
+                        Log.ui.info("ui: lens tap -> toggle selfie framing (from \(camera.activeLens?.id ?? "nil", privacy: .public))")
+                        Task { await camera.toggleFrontFraming() }
                     } else {
                         closeFloating()
                         presentZoomRuler()
                     }
                 },
-                onScrubBegin: {
+                onScrubBegin: { roomBelow in
                     closeFloating()
-                    beginZoomScrub()
+                    beginZoomScrub(roomBelow: roomBelow)
                 },
                 onScrubChange: { dy in perform(zoomScrub.update(dy: dy)) },
                 onScrubEnd: { endZoomScrub() }
@@ -914,11 +928,22 @@ struct CameraScreen: View {
         if showLensPicker { showLensPicker = false }
     }
 
-    private func beginZoomScrub() {
+    private func beginZoomScrub(roomBelow: CGFloat) {
         zoomHideTask?.cancel()
-        let lens = camera.currentLens
-        Log.ui.info("ui: zoom scrub begin lens=\(lens?.id ?? "nil", privacy: .public) stops=\(String(describing: camera.zoomStops), privacy: .public)")
-        zoomScrub.begin(stops: camera.zoomStops, zoom: lens?.zoom ?? 1, isFront: lens?.isFront == true)
+        // The camera in use or being switched to: right after a flip the
+        // session may still be reconfiguring, and the ruler must already show
+        // (and flip from) the new camera's stops.
+        let lens = camera.activeLens
+        let isFront = lens?.isFront == true
+        // A flip needs the other camera, and can't happen mid-recording (the
+        // ends are then plain rubber bands: no tension, no SELFIE/BACK hint).
+        let otherExists = camera.lenses.contains { $0.isFront != isFront }
+        let canFlip = otherExists && !camera.isRecording
+        // Only the pull down (back → selfie) can run out of screen.
+        let room: CGFloat = isFront ? .infinity : roomBelow
+        zoomScrub.begin(stops: camera.zoomStops, zoom: lens?.zoom ?? 1, isFront: isFront,
+                        canFlip: canFlip, flipRoom: room)
+        Log.ui.info("ui: zoom scrub begin lens=\(lens?.id ?? "nil", privacy: .public) current=\(camera.currentLens?.id ?? "nil", privacy: .public) front=\(isFront, privacy: .public) stops=\(String(describing: camera.zoomStops), privacy: .public) canFlip=\(canFlip, privacy: .public) recording=\(camera.isRecording, privacy: .public) roomBelow=\(Double(roomBelow), privacy: .public) flipThreshold=\(Double(zoomScrub.flipThreshold), privacy: .public)")
         if !zoomDialVisible {
             withAnimation(Theme.snappy) { zoomDialVisible = true }
         }
@@ -927,7 +952,7 @@ struct CameraScreen: View {
     /// Tap: show the ruler without zooming, and leave it out a little longer
     /// so it reads as "you can slide this".
     private func presentZoomRuler() {
-        let lens = camera.currentLens
+        let lens = camera.activeLens
         zoomScrub.present(stops: camera.zoomStops, zoom: lens?.zoom ?? 1, isFront: lens?.isFront == true)
         withAnimation(Theme.snappy) { zoomDialVisible = true }
         scheduleRulerHide(after: .milliseconds(3000))
@@ -963,6 +988,8 @@ struct CameraScreen: View {
             camera.setZoom(zoom)
         case .flip?:
             if camera.isRecording {
+                // Not offered while recording (canFlip), but recording may
+                // have started mid-gesture.
                 Log.ui.info("ui: zoom flip ignored while recording")
                 foldRulerForFlip()
                 return
@@ -976,22 +1003,16 @@ struct CameraScreen: View {
     private func performFlip(_ action: ZoomScrubModel.Action?) {
         switch action {
         case .flip(.front)?:
-            Log.ui.info("ui: zoom flip to front")
+            Log.ui.info("ui: zoom flip to front (target \(camera.flipTarget(toFront: true)?.id ?? "nil", privacy: .public))")
             foldRulerForFlip()
-            if let front = camera.lenses.first(where: \.isFront) { select(front) }
+            Task { await camera.flip(toFront: true) }
         case .flip(.back)?:
-            Log.ui.info("ui: zoom flip to back")
+            Log.ui.info("ui: zoom flip to back (target \(camera.flipTarget(toFront: false)?.id ?? "nil", privacy: .public))")
             foldRulerForFlip()
-            let back = camera.lenses.first { $0.id == "back.wide" } ?? camera.lenses.first { !$0.isFront }
-            if let back { select(back) }
+            Task { await camera.flip(toFront: false) }
         default:
             break
         }
-    }
-
-    private func select(_ lens: Lens) {
-        guard lens.id != camera.currentLens?.id else { return }
-        Task { await camera.select(lens) }
     }
 
     private func stepLook(_ direction: Int) {

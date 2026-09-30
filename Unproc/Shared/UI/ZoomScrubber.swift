@@ -6,9 +6,18 @@ import SwiftUI
 /// stop owns a flat "detent" band where zoom holds exactly at the stop (so stops
 /// feel magnetic), and the ramps between stops are log-linear in zoom, free of
 /// any resistance, so every value in between (1.2×, 1.3×, …) is reachable.
-/// Dragging past either end runs into rubber-band resistance; pull far enough
-/// past the bottom and the camera flips to the selfie lens (and, from selfie,
-/// pull past the top to flip back).
+/// Dragging past either end stop runs into rubber-band resistance; pull
+/// `flipThreshold` past the widest back stop and the camera flips to the
+/// selfie camera (and, from selfie, the same pull past its longest stop flips
+/// back). Overshoot is measured from the end stop's *centre* — not from where
+/// the drag began, and not from the outer edge of the stop's detent band — so
+/// the pull needed is the same whichever stop the drag started on, and the
+/// band doesn't swallow part of it. One flip per gesture at most; after it the
+/// rest of the drag is ignored (it belongs to the old camera).
+///
+/// The front camera has its own stops (the square Center Stage sensor's wide
+/// and standard framings); with a single front stop the scale is hidden and
+/// only the flip back remains.
 ///
 /// Landing on a stop:
 /// - While dragging, anywhere inside a stop's band reads exactly the stop, with
@@ -40,8 +49,12 @@ final class ZoomScrubModel {
     static let liftOffJitter: CGFloat = 6
     /// Track points per unit of ln(zoom).
     static let pointsPerLog: CGFloat = 72
-    /// Raw overshoot needed to flip cameras.
+    /// Raw overshoot past the end stop's centre needed to flip cameras.
     static let flipDistance: CGFloat = 56
+    /// The shortest the flip pull gets when the finger has little room left
+    /// (the lens button sits near the bottom of the screen): below this an
+    /// accidental overshoot could flip.
+    static let minFlipDistance: CGFloat = 34
     /// Rubber-band limit: visual overshoot approaches this but never reaches it.
     static let stretchLimit: CGFloat = 54
 
@@ -63,13 +76,21 @@ final class ZoomScrubModel {
     private(set) var fineTick = 0
     /// 1…3 as the rubber band tightens toward a flip; drives rising pulses.
     private(set) var tension = 0
-    /// True while scrubbing from the selfie camera (the track only flips back).
+    /// True while showing the selfie camera's stops (its flip goes up, to the back).
     private(set) var isFront = false
+    /// Whether this gesture may flip cameras at all (not while recording, not
+    /// when the other camera doesn't exist). Without it the ends are plain
+    /// rubber bands: no tension, no hint, no flip.
+    private(set) var canFlip = true
+    /// Overshoot that flips during the current gesture (`flipDistance`, less
+    /// when the finger would run out of screen first).
+    private(set) var flipThreshold: CGFloat = ZoomScrubModel.flipDistance
 
     private(set) var stops: [CGFloat] = [1]
     /// Thumb position when the current scrub began.
     private(set) var startPosition: CGFloat = 0
-    private var didFlip = false
+    /// A flip has fired during the current gesture.
+    private(set) var didFlip = false
     private var lastDetent: Int?
     private var lastFineStep: Int?
 
@@ -91,6 +112,14 @@ final class ZoomScrubModel {
         }
         return total
     }
+
+    /// There's a scale to show (a single selfie stop has none: only the flip).
+    var showsScale: Bool { stops.count > 1 }
+
+    /// Track positions of the widest and longest stops' centres: the thumb
+    /// never goes past them; beyond is rubber band (and the flip).
+    var lowestStopPosition: CGFloat { position(ofStop: 0) }
+    var highestStopPosition: CGFloat { position(ofStop: max(stops.count - 1, 0)) }
 
     /// What the readout shows: while dragging, the value a release here would
     /// settle on (so "1.1×" never turns into 1× on lift, or vice versa).
@@ -206,17 +235,24 @@ final class ZoomScrubModel {
         self.stops = stops.isEmpty ? [1] : stops
         self.isFront = isFront
         self.zoom = zoom
-        position = isFront ? 0 : position(forZoom: zoom)
+        position = position(forZoom: zoom)
         stretch = 0
         flipProgress = 0
         tension = 0
     }
 
-    func begin(stops: [CGFloat], zoom: CGFloat, isFront: Bool) {
+    /// Starts a drag. `flipRoom` is how far the finger can still travel toward
+    /// the flip (down, for the back camera) before the screen runs out: when
+    /// reaching the widest stop and then pulling `flipDistance` past it
+    /// wouldn't fit, the flip pull is shortened (never below
+    /// `minFlipDistance`) so it stays reachable in one gesture.
+    func begin(stops: [CGFloat], zoom: CGFloat, isFront: Bool, canFlip: Bool = true,
+               flipRoom: CGFloat = .infinity) {
         self.stops = stops.isEmpty ? [1] : stops
         self.isFront = isFront
+        self.canFlip = canFlip
         self.zoom = zoom
-        position = isFront ? 0 : position(forZoom: zoom)
+        position = position(forZoom: zoom)
         startPosition = position
         stretch = 0
         flipProgress = 0
@@ -225,6 +261,13 @@ final class ZoomScrubModel {
         lastDetent = detentIndex(at: position)
         lastFineStep = nil
         samples.removeAll()
+        // Travel from here to the end stop the flip pulls past.
+        let travel = isFront ? max(highestStopPosition - position, 0) : max(position - lowestStopPosition, 0)
+        if flipRoom.isFinite {
+            flipThreshold = min(max(flipRoom - travel, Self.minFlipDistance), Self.flipDistance)
+        } else {
+            flipThreshold = Self.flipDistance
+        }
         isActive = true
     }
 
@@ -233,35 +276,40 @@ final class ZoomScrubModel {
     /// Returns an action for the camera, if any.
     func update(dy: CGFloat, now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Action? {
         // After a flip the rest of this drag belongs to the old camera: ignore it
-        // (otherwise it would zoom the back camera again, undoing the flip).
+        // (otherwise it would zoom the new camera, or flip straight back).
         guard isActive, !didFlip else { return nil }
         let raw = startPosition - dy
-        let upper = length
         samples.append(Sample(time: now, raw: raw))
         if samples.count > Self.maxSamples { samples.removeFirst(samples.count - Self.maxSamples) }
 
-        if isFront {
-            // From selfie: only an upward pull (to flip back) does anything.
-            let overshoot = max(raw, 0)
-            position = 0
-            stretch = Self.rubber(overshoot)
-            return flipCheck(overshoot: overshoot, to: .back)
+        let lo = lowestStopPosition
+        let hi = highestStopPosition
+        if raw < lo {
+            // Past the widest stop: hold it, rubber band; on the back camera
+            // this is the pull toward the selfie camera.
+            position = lo
+            stretch = -Self.rubber(lo - raw)
+            lastFineStep = nil
+            if !isFront, canFlip {
+                if let flip = flipCheck(overshoot: lo - raw, to: .front) { return flip }
+            } else {
+                resetTension()
+            }
+            return pinToEnd(stop: 0)
         }
-
-        if raw < 0 {
-            position = 0
-            stretch = -Self.rubber(-raw)
-            zoom = stops.first ?? 1
-            return flipCheck(overshoot: -raw, to: .front) ?? .zoom(zoom)
+        if raw > hi {
+            // Past the longest stop; from the selfie camera, the pull back.
+            position = hi
+            stretch = Self.rubber(raw - hi)
+            lastFineStep = nil
+            if isFront, canFlip {
+                if let flip = flipCheck(overshoot: raw - hi, to: .back) { return flip }
+            } else {
+                resetTension()
+            }
+            return pinToEnd(stop: stops.count - 1)
         }
-        flipProgress = 0
-        tension = 0
-        if raw > upper {
-            position = upper
-            stretch = Self.rubber(raw - upper)
-            zoom = stops.last ?? 1
-            return .zoom(zoom)
-        }
+        resetTension()
         stretch = 0
         position = raw
         let newZoom = zoom(at: raw)
@@ -283,16 +331,35 @@ final class ZoomScrubModel {
         return .zoom(newZoom)
     }
 
+    /// The thumb is pinned on an end stop: zoom exactly there (reported once,
+    /// not on every frame of the stretch), ticking if it just arrived.
+    private func pinToEnd(stop index: Int) -> Action? {
+        guard stops.indices.contains(index) else { return nil }
+        if lastDetent != index { detentTick += 1 }
+        lastDetent = index
+        let stop = stops[index]
+        guard stop != zoom else { return nil }
+        zoom = stop
+        return .zoom(stop)
+    }
+
+    private func resetTension() {
+        if flipProgress != 0 { flipProgress = 0 }
+        if tension != 0 { tension = 0 }
+    }
+
     /// Ends the scrub: ignores lift-off jitter, then settles exactly on a stop
-    /// within `releaseZone`, or keeps the value rounded to 0.1×.
+    /// within `releaseZone`, or keeps the value rounded to 0.1×. A release
+    /// short of the flip just springs back (the stretch returns to 0).
     func end(now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Action? {
         defer {
             isActive = false
             stretch = 0
             flipProgress = 0
+            tension = 0
             samples.removeAll()
         }
-        guard !didFlip, !isFront else { return nil }
+        guard !didFlip else { return nil }
         let raw = settledRaw(at: now) ?? startPosition
         // Never moved (a tap or hold on the ruler): leave the zoom as it was,
         // even if it's an off-stop value from a pinch.
@@ -303,7 +370,7 @@ final class ZoomScrubModel {
             zoom = original
             return .zoom(original)
         }
-        let s = min(max(raw, 0), length)
+        let s = min(max(raw, lowestStopPosition), highestStopPosition)
         let settled = Self.settle(zoom(at: s), stops: stops)
         position = position(forZoom: settled)
         if let i = stops.firstIndex(of: settled) {
@@ -329,11 +396,13 @@ final class ZoomScrubModel {
     }
 
     private func flipCheck(overshoot: CGFloat, to side: Action.Side) -> Action? {
-        flipProgress = min(overshoot / Self.flipDistance, 1)
+        let threshold = max(flipThreshold, 1)
+        let progress = min(overshoot / threshold, 1)
+        if progress != flipProgress { flipProgress = progress }
         // Rising pulses as it tightens: 25 %, 50 %, 75 % of the way.
-        let stage = min(Int(flipProgress * 4), 3)
+        let stage = min(Int(progress * 4), 3)
         if stage != tension { tension = stage }
-        guard !didFlip, overshoot >= Self.flipDistance else { return nil }
+        guard !didFlip, overshoot >= threshold else { return nil }
         didFlip = true
         flipTick += 1
         return .flip(side)
@@ -416,7 +485,8 @@ struct ZoomRuler: View {
             context.stroke(mark, with: .color(Theme.accent), style: StrokeStyle(lineWidth: 2, lineCap: .round))
         }
 
-        guard !model.isFront else { return }
+        // A single selfie stop has no scale: just the marks (and the flip hint).
+        guard model.showsScale else { return }
         let stops = model.stops
 
         // Minor ticks: 8 per gap between stops, evenly spaced in log zoom.

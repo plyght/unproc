@@ -74,12 +74,83 @@ enum LensDiscovery {
         backLenses.sort { $0.zoom < $1.zoom }
 
         if let front {
-            backLenses.append(Lens(id: "front.wide", deviceID: front.uniqueID, position: .front,
-                                   kind: .front, crop: 1, zoom: 1))
+            backLenses.append(contentsOf: frontLenses(front))
         }
         let list = backLenses.map(CameraLogText.lens).joined(separator: " ")
         Log.camera.notice("lenses: \(backLenses.count, privacy: .public) [\(list, privacy: .public)]")
         return backLenses
+    }
+
+    // MARK: Selfie framings
+
+    /// The selfie camera's framings on one device, as `videoZoomFactor`s.
+    struct FrontFraming: Equatable, Sendable {
+        /// The wide framing ("zoom out"): the device's minimum factor.
+        var wideFactor: CGFloat
+        /// The standard selfie framing: display zoom 1.
+        var tightFactor: CGFloat
+        /// How the tight factor was found ("multiplier" or "fallback").
+        var source: String
+    }
+
+    /// Standard framing on the square Center Stage sensor when the device
+    /// reports no usable `displayVideoZoomFactorMultiplier`.
+    static let squareFrontFallbackFactor: CGFloat = 1.3
+    /// Below this ratio over the wide factor, a second stop isn't worth having.
+    static let minFrontStopRatio: CGFloat = 1.1
+
+    /// Decides the selfie stops. `multiplier` is the device's
+    /// `displayVideoZoomFactorMultiplier` (display zoom = factor × multiplier),
+    /// so the standard framing is the factor that displays as 1×: 1 / multiplier,
+    /// if that's at least `minFrontStopRatio` above the minimum and within the
+    /// format's range. Otherwise the square Center Stage sensor gets
+    /// `squareFrontFallbackFactor`; any other front camera stays a single lens.
+    static func frontFraming(minFactor: CGFloat, maxFactor: CGFloat, multiplier: CGFloat,
+                             isSquareSensor: Bool) -> FrontFraming? {
+        let wide = max(minFactor.isFinite ? minFactor : 1, 1)
+        let upper = maxFactor.isFinite ? maxFactor : wide
+        if multiplier.isFinite, multiplier > 0 {
+            let tight = 1 / multiplier
+            if tight >= wide * minFrontStopRatio, tight <= upper {
+                return FrontFraming(wideFactor: wide, tightFactor: tight, source: "multiplier")
+            }
+        }
+        guard isSquareSensor else { return nil }
+        let tight = wide * squareFrontFallbackFactor
+        guard tight <= upper else { return nil }
+        return FrontFraming(wideFactor: wide, tightFactor: tight, source: "fallback")
+    }
+
+    /// Selfie lenses on `device`. With two framings: "front.wide" (the
+    /// device's minimum factor, i.e. the widest view — the same framing the
+    /// single front lens always had) and "front.tight" (the standard selfie
+    /// framing). `Lens.zoom` is display zoom with the standard framing at 1
+    /// (so the wide one reads e.g. ".8×"); `crop` is the `videoZoomFactor`.
+    static func frontLenses(_ device: AVCaptureDevice) -> [Lens] {
+        // The format the engine will make active (the square dynamic-aspect one
+        // on the Center Stage sensor), not whatever is active right now.
+        let format = CaptureFormatPicker.bestPhotoFormat(for: device) ?? device.activeFormat
+        let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+        let square = dims.width > 0 && dims.width == dims.height && !format.supportedDynamicAspectRatios.isEmpty
+        let minFactor = device.minAvailableVideoZoomFactor
+        let maxFactor = format.videoMaxZoomFactor
+        let multiplier = CGFloat(device.displayVideoZoomFactorMultiplier)
+        let framing = frontFraming(minFactor: minFactor, maxFactor: maxFactor, multiplier: multiplier,
+                                   isSquareSensor: square)
+        let single = Lens(id: "front.wide", deviceID: device.uniqueID, position: .front,
+                          kind: .front, crop: 1, zoom: 1)
+        guard let framing else {
+            Log.camera.notice("lenses: front single framing type=\(device.deviceType.rawValue, privacy: .public) square=\(square, privacy: .public) minFactor=\(Double(minFactor), privacy: .public) maxFactor=\(Double(maxFactor), privacy: .public) multiplier=\(Double(multiplier), privacy: .public)")
+            return [single]
+        }
+        let wideZoom = framing.wideFactor / framing.tightFactor
+        Log.camera.notice("lenses: front framings type=\(device.deviceType.rawValue, privacy: .public) square=\(square, privacy: .public) minFactor=\(Double(minFactor), privacy: .public) maxFactor=\(Double(maxFactor), privacy: .public) multiplier=\(Double(multiplier), privacy: .public) -> wide factor=\(Double(framing.wideFactor), privacy: .public) (display \(Double(wideZoom), privacy: .public)x) tight factor=\(Double(framing.tightFactor), privacy: .public) (display 1x) source=\(framing.source, privacy: .public)")
+        return [
+            Lens(id: "front.wide", deviceID: device.uniqueID, position: .front,
+                 kind: .front, crop: framing.wideFactor, zoom: wideZoom),
+            Lens(id: "front.tight", deviceID: device.uniqueID, position: .front,
+                 kind: .front, crop: framing.tightFactor, zoom: 1),
+        ]
     }
 
     /// The back virtual device the lenses run on, with the display zoom of its

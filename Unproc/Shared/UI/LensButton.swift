@@ -1,13 +1,16 @@
 import SwiftUI
+import os
 
 /// Bottom-right lens button: the zoom number in a Liquid Glass circle.
 ///
 /// - Tap, press and hold, or start dragging vertically: the glass circle fades
 ///   away, the number stays where it is, and a vertical ruler appears through
 ///   it. Drag up to zoom in, down to zoom out; keep forcing past .5× to flip to
-///   the selfie camera. Release and the ruler hides as the circle comes back.
+///   the selfie camera (and from the selfie camera, up past its longest stop to
+///   flip back). Release and the ruler hides as the circle comes back.
 ///   A plain tap opens the ruler (lingering longer, inviting a slide); a tap
-///   while it's out closes it.
+///   while it's out closes it. On a selfie camera with two framings a tap
+///   swaps between them instead (see `CameraScreen`).
 ///
 /// One `DragGesture(minimumDistance: 0)` drives all of it so a hold never
 /// also fires a tap and the drag continues seamlessly from the press.
@@ -16,11 +19,18 @@ struct LensButton: View {
     let model: ZoomScrubModel
     /// True while the ruler is showing (it lingers briefly after release).
     let isExpanded: Bool
+    /// The selfie camera has more than one framing (square Center Stage
+    /// sensor): the button shows which one next to the selfie icon.
+    var frontHasStops: Bool = false
     /// Room below the button's centre the ruler may use (see `ZoomRuler.maxBelow`).
     var rulerMaxBelow: CGFloat = .infinity
+    /// Global y of the screen's bottom edge: how far a drag can still go down.
+    var screenBottom: CGFloat = .infinity
     /// Tap with no drag: `true` when the ruler was already out.
     let onTap: (_ whileExpanded: Bool) -> Void
-    let onScrubBegin: () -> Void
+    /// A scrub starts; the argument is how far the finger can still travel
+    /// down before it runs out of screen.
+    let onScrubBegin: (_ roomBelow: CGFloat) -> Void
     let onScrubChange: (CGFloat) -> Void
     let onScrubEnd: () -> Void
 
@@ -34,7 +44,14 @@ struct LensButton: View {
     /// recognise a drag (or any creep during a hold) doesn't push the thumb
     /// off the stop it started on.
     @State private var lastTranslation: CGFloat = 0
+    @State private var lastLocationY: CGFloat = 0
     @State private var scrubOrigin: CGFloat = 0
+    /// True for as long as the system considers the touch alive. When a drag
+    /// is cancelled (the view hierarchy changing under it as a flip swaps
+    /// cameras, a system gesture…) `onEnded` never runs; this resetting is
+    /// how we notice, so a scrub is never left half-open — which used to
+    /// leave `isPressed` stuck and every later drag on the button dead.
+    @GestureState private var touchAlive = false
 
     static let rulerSize = CGSize(width: 64, height: 232)
     /// Touch target while the ruler is out: wider and taller than the drawn
@@ -46,24 +63,46 @@ struct LensButton: View {
     private static let buttonHitOutset: CGFloat = 6
     private static let holdDelay: Duration = .milliseconds(260)
     private static let dragToScrub: CGFloat = 8
+    /// A finger can't usefully drag closer than this to the bottom edge (the
+    /// home-indicator zone; the thumb's pad sits below its touch point).
+    private static let bottomEdgeMargin: CGFloat = 24
+
+    /// The ruler is out with a scale: the button shows the live readout.
+    private var showsReadout: Bool { isExpanded && model.showsScale }
 
     private var label: String {
-        if isExpanded, !model.isFront { return ZoomDial.label(model.displayZoom, precise: true) }
+        if showsReadout { return ZoomDial.label(model.displayZoom, precise: true) }
         return current?.buttonLabel ?? "—"
     }
 
     /// Front camera: an icon (the word FRONT doesn't fit between the ruler's marks).
     private var showsFrontIcon: Bool {
-        current?.isFront == true && !(isExpanded && !model.isFront)
+        current?.isFront == true && !showsReadout
+    }
+
+    /// Which selfie framing is on (".8" / "1"), when there's a choice.
+    private var frontZoomText: String? {
+        guard frontHasStops, let current, current.isFront else { return nil }
+        return ZoomDial.label(current.zoom).replacingOccurrences(of: "\u{00D7}", with: "")
     }
 
     @ViewBuilder
     private var labelContent: some View {
         if showsFrontIcon {
-            Image(systemName: "person.fill")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(isExpanded ? Theme.accent : Theme.primary)
-                .transition(.opacity)
+            HStack(spacing: 2) {
+                Image(systemName: "person.fill")
+                    .font(.system(size: frontZoomText == nil ? 14 : 11, weight: .semibold))
+                if let text = frontZoomText {
+                    Text(text)
+                        .monoLabel(12, weight: .semibold,
+                                   color: isExpanded ? Theme.accent : Theme.primary,
+                                   uppercase: false)
+                        .monospacedDigit()
+                        .contentTransition(.numericText())
+                }
+            }
+            .foregroundStyle(isExpanded ? Theme.accent : Theme.primary)
+            .transition(.opacity)
         } else {
             Text(label)
                 .monoLabel(14, weight: .semibold,
@@ -99,22 +138,29 @@ struct LensButton: View {
                 }
                 .frame(width: 52, height: 52)
                 // Glass only in the resting state; it melts away for the ruler.
-                .glassEffect(isExpanded ? .identity : .regular.interactive(), in: .circle)
+                // Not interactive mid-scrub: a flip folds the ruler while the
+                // finger is still down, and interactive glass coming back under
+                // it must not take the touch over.
+                .glassEffect(isExpanded ? .identity : .regular.interactive(!isScrubbing), in: .circle)
         }
         .frame(width: 52, height: 52)
         // Transparent/glass regions don't hit-test on their own: an explicit
         // shape, reaching past the 52 pt frame, so the whole ruler area grabs.
+        // It stays large for the whole scrub (even once a flip has folded the
+        // ruler) so the hit area never shrinks out from under the finger.
         .contentShape(LensHitShape(
-            expandedSize: isExpanded ? Self.rulerHitSize : nil,
+            expandedSize: isExpanded || isScrubbing ? Self.rulerHitSize : nil,
             outset: Self.buttonHitOutset
         ))
-        .scaleEffect(isPressed && !isExpanded ? 0.94 : 1)
+        .scaleEffect(isPressed && !isExpanded && !isScrubbing ? 0.94 : 1)
         .animation(Theme.press, value: isPressed)
         .animation(Theme.snappy, value: isExpanded)
         .gesture(
             DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                .updating($touchAlive) { _, alive, _ in alive = true }
                 .onChanged { value in
                     lastTranslation = value.translation.height
+                    lastLocationY = value.location.y
                     if !isPressed {
                         isPressed = true
                         moved = false
@@ -137,31 +183,55 @@ struct LensButton: View {
                     }
                 }
                 .onEnded { _ in
-                    holdTask?.cancel()
-                    holdTask = nil
-                    isPressed = false
-                    if isScrubbing {
-                        isScrubbing = false
-                        onScrubEnd()
-                        // A touch on the open ruler that never moved is a tap: close it.
-                        if startedExpanded && !moved { onTap(true) }
-                    } else {
-                        onTap(false)
-                    }
+                    finishTouch(cancelled: false)
                 }
         )
+        .onChange(of: touchAlive) { _, alive in
+            guard !alive, isPressed else { return }
+            // Either the normal end (whose `onEnded` may still be on its way)
+            // or a cancellation (it never comes): look again once a normal end
+            // has had its chance.
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(60))
+                guard isPressed, !touchAlive else { return }
+                Log.ui.notice("ui: lens gesture cancelled mid-touch (scrubbing=\(isScrubbing, privacy: .public)); ending it")
+                finishTouch(cancelled: true)
+            }
+        }
         .sensoryFeedback(.impact(weight: .light), trigger: isScrubbing) { _, new in new }
         .accessibilityAddTraits(.isButton)
-        .accessibilityLabel("Lens \(current?.buttonLabel ?? "")")
+        .accessibilityLabel(accessibilityText)
         .accessibilityHint("Hold, then drag up to zoom in or down to zoom out")
         .accessibilityIdentifier("lensButton")
+    }
+
+    private var accessibilityText: String {
+        var text = "Lens \(current?.buttonLabel ?? "")"
+        if let zoom = frontZoomText { text += " \(zoom)\u{00D7}" }
+        return text
     }
 
     private func beginScrub(at translation: CGFloat) {
         guard !isScrubbing else { return }
         scrubOrigin = translation
         isScrubbing = true
-        onScrubBegin()
+        onScrubBegin(max(screenBottom - Self.bottomEdgeMargin - lastLocationY, 0))
+    }
+
+    /// The touch is over: lifted (`cancelled` false) or taken away by the system.
+    private func finishTouch(cancelled: Bool) {
+        guard isPressed else { return }
+        holdTask?.cancel()
+        holdTask = nil
+        isPressed = false
+        if isScrubbing {
+            isScrubbing = false
+            onScrubEnd()
+            // A touch on the open ruler that never moved is a tap: close it.
+            if !cancelled, startedExpanded, !moved { onTap(true) }
+        } else if !cancelled {
+            onTap(false)
+        }
     }
 }
 
