@@ -401,6 +401,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             }
             setZoom(lens.crop, on: device)
             applyIntent(intent)
+            applyTorch()
             let ms = CameraLogText.ms(clock.now - began)
             Log.video.notice("mode: now \(request == nil ? "photo" : "video", privacy: .public) active=\(self.activeVideo?.label ?? "photo", privacy: .public) format=\(CameraLogText.format(device.activeFormat), privacy: .public) running=\(self.session.isRunning, privacy: .public) in \(ms, privacy: .public)ms")
             return .configured(lens: lens, ranges: ranges(of: device), video: activeVideo)
@@ -464,6 +465,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             )
             let recorder = VideoRecorder(config: config)
             recorderLock.withLock { activeRecorder = recorder }
+            applyTorch()
             Log.video.notice("record: started \(url.lastPathComponent, privacy: .public) \(video.label, privacy: .public) hold=\(held.rawValue, privacy: .public) recordedAngle=\(recordedAngle, privacy: .public) captureAngle=\(captureAngle, privacy: .public) rotation=\(rotation, privacy: .public) front=\(isFront, privacy: .public) look=\(config.look.id, privacy: .public)")
             return .success(())
         }
@@ -482,6 +484,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             throw UnprocError.captureFailed("Not recording")
         }
         Log.video.notice("record: stopping")
+        sessionQueue.async { [self] in applyTorch() }
         return try await recorder.finish()
     }
 
@@ -493,6 +496,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             return current
         }
         recorder?.cancel()
+        sessionQueue.async { [self] in applyTorch() }
     }
 
     private func configureOutputs() {
@@ -608,6 +612,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         }
         setZoom(lens.crop, on: newDevice)
         bind(newDevice)
+        applyTorch()
         // Controls aren't device-bound: install once, keep them across lens switches.
         if controlsConfig != nil, session.controls.isEmpty {
             Log.controls.info("controls: none installed after device switch; installing")
@@ -1577,6 +1582,35 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         sessionQueue.async { [self] in
             flashMode = mode
             Log.capture.info("flash: set \(mode.rawValue, privacy: .public)")
+            applyTorch()
+        }
+    }
+
+    /// Video mode uses the flash setting as a continuous light: ON keeps the
+    /// torch lit (viewfinder too, so the shot can be framed), AUTO lets the
+    /// camera light it as needed only while recording. Off everywhere else.
+    /// Session queue.
+    private func applyTorch() {
+        guard let device, device.hasTorch else { return }
+        let recording = recorderLock.withLock { activeRecorder } != nil
+        let wanted: AVCaptureDevice.TorchMode
+        if videoRequest == nil {
+            wanted = .off
+        } else {
+            switch flashMode {
+            case .on: wanted = .on
+            case .auto: wanted = recording ? .auto : .off
+            default: wanted = .off
+            }
+        }
+        guard device.torchMode != wanted, device.isTorchModeSupported(wanted) else { return }
+        do {
+            try device.lockForConfiguration()
+            device.torchMode = wanted
+            device.unlockForConfiguration()
+            Log.video.info("torch: \(wanted.rawValue, privacy: .public) (flash=\(self.flashMode.rawValue, privacy: .public) recording=\(recording, privacy: .public))")
+        } catch {
+            Log.video.error("torch: lock failed: \(Log.describe(error), privacy: .public)")
         }
     }
 

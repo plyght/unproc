@@ -539,16 +539,19 @@ struct CameraScreen: View {
         return ZStack(alignment: .top) {
             HStack(alignment: .top, spacing: 0) {
                 HStack(alignment: .top, spacing: 0) {
-                    if camera.hasFlash && !isVideo {
+                    if camera.hasFlash {
+                        // Stays live while recording: the torch can be toggled mid-take.
                         flashButton
                     } else if camera.supportsSelfieOrientation && camera.currentLens?.isFront == true && !isVideo {
                         selfieOrientationButton
+                            .opacity(recording ? 0 : 1)
+                            .allowsHitTesting(!recording)
                     }
                     timerButton
+                        .opacity(recording ? 0 : 1)
+                        .allowsHitTesting(!recording)
                 }
                 .padding(8)   // buttons carry 4pt of invisible tap margin: glass stays 12pt from the edge
-                .opacity(recording ? 0 : 1)
-                .allowsHitTesting(!recording)
                 .animation(Theme.snappy, value: camera.currentLens?.id)
 
                 Spacer(minLength: 0)
@@ -701,7 +704,7 @@ struct CameraScreen: View {
                 } else {
                     HStack(spacing: 0) {
                         thumbnailSlot
-                        modeSwitchSlot
+                        modeSwitchSlot(m)
                     }
                 }
             }
@@ -712,7 +715,7 @@ struct CameraScreen: View {
             Group {
                 if lefty {
                     HStack(spacing: 0) {
-                        modeSwitchSlot
+                        modeSwitchSlot(m)
                         thumbnailSlot
                     }
                 } else {
@@ -736,12 +739,12 @@ struct CameraScreen: View {
     /// The PHOTO / VIDEO switch, centred in the space between thumbnail and
     /// shutter (nothing in the lock-screen extension: photos only there).
     @ViewBuilder
-    private var modeSwitchSlot: some View {
+    private func modeSwitchSlot(_ m: Metrics) -> some View {
         if hooks.isLockedCapture {
             Spacer(minLength: 0)
         } else {
             let recording = camera.isRecording
-            ModeSwitch(mode: settings.value.mode) { (mode: CaptureMode) in
+            ModeSwitch(mode: settings.value.mode, height: m.shutterHeight) { (mode: CaptureMode) in
                 Log.ui.info("ui: mode -> \(mode.rawValue, privacy: .public)")
                 cancelCountdown()
                 closeFloating()
