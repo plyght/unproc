@@ -57,7 +57,12 @@ final class CameraController {
 
     /// Whether the current lens has a flash (every back camera shares the LED;
     /// the front camera has none here).
-    var hasFlash: Bool { currentLens.map { !$0.isFront } ?? false }
+    /// Back: flash (torch in video). Front: Retina Flash for photos (the
+    /// photo output lights the screen); no front light for video.
+    var hasFlash: Bool {
+        guard let lens = currentLens else { return false }
+        return !lens.isFront || !isVideoMode
+    }
 
     /// Flash for the next shot. Ignored where unsupported (and on the front camera).
     var flash: FlashSetting = .off {

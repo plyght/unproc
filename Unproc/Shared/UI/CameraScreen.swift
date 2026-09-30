@@ -542,7 +542,8 @@ struct CameraScreen: View {
                     if camera.hasFlash {
                         // Stays live while recording: the torch can be toggled mid-take.
                         flashButton
-                    } else if camera.supportsSelfieOrientation && camera.currentLens?.isFront == true && !isVideo {
+                    }
+                    if camera.supportsSelfieOrientation && camera.currentLens?.isFront == true && !isVideo {
                         selfieOrientationButton
                             .opacity(recording ? 0 : 1)
                             .allowsHitTesting(!recording)
