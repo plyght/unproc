@@ -5,9 +5,10 @@ import SwiftUI
 
 // MARK: - Mode switch
 
-/// PHOTO / VIDEO toggle between the shutter and the thumbnail: one round
-/// glass button showing the current mode (white camera, or red video
-/// camera); tap to switch. A horizontal or vertical swipe on it also
+/// PHOTO / VIDEO toggle between the shutter and the thumbnail: a glass
+/// tile with exactly the thumbnail's outer size and corner radius (50pt,
+/// 13pt continuous) so the two read as a pair, showing the current mode
+/// (white camera, or red video camera); tap to switch. A horizontal or vertical swipe on it also
 /// switches. Its identifier names the mode a tap switches to.
 struct ModeSwitch: View {
     let mode: CaptureMode
@@ -15,8 +16,10 @@ struct ModeSwitch: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    static let width: CGFloat = 48
-    static let diameter: CGFloat = 44
+    static let width: CGFloat = 50
+    /// Matches ThumbnailButton's outer frame (44 + 2×3 rim) and rim radius (10 + 3).
+    static let side: CGFloat = 50
+    static let corner: CGFloat = 13
 
     private var target: CaptureMode { mode == .photo ? .video : .photo }
 
@@ -29,9 +32,8 @@ struct ModeSwitch: View {
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(video ? RecordButton.red : Theme.primary)
                 .contentTransition(.symbolEffect(.replace.downUp))
-                .frame(width: Self.diameter, height: Self.diameter)
-                .glassEffect(.regular.interactive(), in: .circle)
-                .frame(width: Self.width, height: Self.width)
+                .frame(width: Self.side, height: Self.side)
+                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: Self.corner, style: .continuous))
                 .contentShape(Rectangle())
         }
         .buttonStyle(PressableStyle(scale: 0.9))
