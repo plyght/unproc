@@ -5,51 +5,80 @@ import SwiftUI
 
 // MARK: - Mode switch
 
-/// PHOTO / VIDEO toggle between the shutter and the thumbnail: a glass
-/// tile with exactly the thumbnail's outer size and corner radius (50pt,
-/// 13pt continuous) so the two read as a pair, showing the current mode
-/// (white camera, or red video camera); tap to switch. A horizontal or vertical swipe on it also
-/// switches. Its identifier names the mode a tap switches to.
+/// PHOTO / VIDEO switch between the shutter and the thumbnail: a slim
+/// vertical glass capsule (the shutter's height) holding a camera and a
+/// video glyph. The selected glyph sits on a solid accent knob that springs
+/// between the two. Tap a glyph, or swipe (left / down = VIDEO,
+/// right / up = PHOTO).
 struct ModeSwitch: View {
     let mode: CaptureMode
+    var height: CGFloat = 64
     let onSelect: (CaptureMode) -> Void
 
+    @Namespace private var selection
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    static let width: CGFloat = 50
-    /// Matches ThumbnailButton's outer frame (44 + 2×3 rim) and rim radius (10 + 3).
-    static let side: CGFloat = 50
-    static let corner: CGFloat = 13
+    static let width: CGFloat = 48
+    private static let inset: CGFloat = 3
 
-    private var target: CaptureMode { mode == .photo ? .video : .photo }
+    private var knob: CGFloat { (height - Self.inset * 2) / 2 }
 
     var body: some View {
-        let video = mode == .video
-        Button {
-            select(target)
-        } label: {
-            Image(systemName: video ? "video.fill" : "camera.fill")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(video ? RecordButton.red : Theme.primary)
-                .contentTransition(.symbolEffect(.replace.downUp))
-                .frame(width: Self.side, height: Self.side)
-                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: Self.corner, style: .continuous))
-                .contentShape(Rectangle())
+        VStack(spacing: 0) {
+            option(.photo, symbol: "camera.fill")
+            option(.video, symbol: "video.fill")
         }
-        .buttonStyle(PressableStyle(scale: 0.9))
+        .padding(Self.inset)
+        .frame(width: knob + Self.inset * 2, height: height)
+        .glassEffect(.regular.tint(Color.black.opacity(0.25)).interactive(), in: .capsule)
+        .frame(width: Self.width)
+        .contentShape(Rectangle())
         .simultaneousGesture(
-            DragGesture(minimumDistance: 12).onEnded { (drag: DragGesture.Value) in
-                let distance = max(abs(drag.translation.width), abs(drag.translation.height))
-                if distance > 14 { select(target) }
+            DragGesture(minimumDistance: 10).onEnded { (drag: DragGesture.Value) in
+                let dx = drag.translation.width
+                let dy = drag.translation.height
+                let target: CaptureMode?
+                if abs(dx) > abs(dy) {
+                    target = dx < -12 ? .video : (dx > 12 ? .photo : nil)
+                } else {
+                    target = dy > 12 ? .video : (dy < -12 ? .photo : nil)
+                }
+                if let target, target != mode { select(target) }
             }
         )
         .sensoryFeedback(.selection, trigger: mode)
-        .accessibilityLabel(Text(video ? "Video mode, switch to photo" : "Photo mode, switch to video"))
-        .accessibilityIdentifier(video ? "mode.photo" : "mode.video")
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("modeSwitch")
+    }
+
+    private func option(_ option: CaptureMode, symbol: String) -> some View {
+        let selected = option == mode
+        return Button {
+            guard !selected else { return }
+            select(option)
+        } label: {
+            ZStack {
+                if selected {
+                    Circle()
+                        .fill(Theme.accent)
+                        .shadow(color: Theme.accent.opacity(0.35), radius: 6)
+                        .matchedGeometryEffect(id: "knob", in: selection)
+                }
+                Image(systemName: symbol)
+                    .font(.system(size: knob * 0.4, weight: .semibold))
+                    .foregroundStyle(selected ? Color.black : Color.white.opacity(0.55))
+                    .contentTransition(.symbolEffect(.replace))
+            }
+            .frame(width: knob, height: knob)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressableStyle(scale: 0.9))
+        .accessibilityLabel(Text(option == .photo ? "Photo" : "Video"))
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityIdentifier(option == .photo ? "mode.photo" : "mode.video")
     }
 
     private func select(_ target: CaptureMode) {
-        guard target != mode else { return }
         withAnimation(reduceMotion ? Theme.fade : .spring(response: 0.3, dampingFraction: 0.74)) {
             onSelect(target)
         }

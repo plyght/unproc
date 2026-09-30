@@ -745,7 +745,7 @@ struct CameraScreen: View {
             Spacer(minLength: 0)
         } else {
             let recording = camera.isRecording
-            ModeSwitch(mode: settings.value.mode) { (mode: CaptureMode) in
+            ModeSwitch(mode: settings.value.mode, height: m.shutterHeight) { (mode: CaptureMode) in
                 Log.ui.info("ui: mode -> \(mode.rawValue, privacy: .public)")
                 cancelCountdown()
                 closeFloating()
