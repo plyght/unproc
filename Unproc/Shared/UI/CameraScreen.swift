@@ -1058,7 +1058,7 @@ struct CameraScreen: View {
 
         hooks.setIdleTimerDisabled(true)
         // Location for Photos metadata: the app asks once; the lock screen never prompts.
-        LocationProvider.shared.start(prompt: !hooks.isLockedCapture && !Theme.isDemo)
+        LocationProvider.shared.start(prompt: !hooks.isLockedCapture && !LaunchArguments.isDemo)
         camera.proEnabled = settings.value.proMode
         camera.flash = settings.value.flash
         if camera.status != .running {
