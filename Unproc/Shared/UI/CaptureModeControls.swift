@@ -8,7 +8,7 @@ import SwiftUI
 /// PHOTO / VIDEO switch between the shutter and the thumbnail: the
 /// original rounded-rectangle glass tile (52 × 52, 13pt continuous corners,
 /// the same outer size and radius as the thumbnail) with a camera and a
-/// video glyph stacked inside. The selected glyph is accent-coloured on a
+/// video glyph stacked inside. The selected glyph is black on a solid accent
 /// sliding rounded pill (10pt radius, concentric with the tile's 3pt inset).
 /// Tap a glyph, or swipe (left / down = VIDEO, right / up = PHOTO).
 struct ModeSwitch: View {
@@ -59,13 +59,13 @@ struct ModeSwitch: View {
         } label: {
             Image(systemName: symbol)
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(selected ? Theme.accent : Color.white.opacity(0.55))
+                .foregroundStyle(selected ? Color.black : Color.white.opacity(0.55))
                 .frame(maxWidth: .infinity, minHeight: Self.rowHeight, maxHeight: Self.rowHeight)
                 .background {
                     if selected {
+                        // Solid accent with a black glyph, like the shutter pill.
                         pill
-                            .fill(Theme.accent.opacity(0.2))
-                            .overlay { pill.strokeBorder(Theme.accent.opacity(0.45), lineWidth: 1) }
+                            .fill(Theme.accent)
                             .matchedGeometryEffect(id: "mode", in: selection)
                     }
                 }
